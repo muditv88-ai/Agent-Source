@@ -11,10 +11,10 @@ app = FastAPI(title="RFP Intelligence Copilot", version="1.0.0")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for dev (change in production)
+    allow_origins=["https://sourceiq-8tm90h0o0-muditv88-ais-projects.vercel.app"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', "ngrok-skip-browser-warning"],
 )
 
 app.include_router(health_router)
