@@ -2,6 +2,7 @@ import uuid
 import shutil
 import json
 import asyncio
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
@@ -22,7 +23,7 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".pdf", ".docx"}
 _executor = ThreadPoolExecutor(max_workers=10)
 
 
-# ─── Upload (fast — just saves file, no LLM) ────────────────────────────────
+# ─── Upload (fast — just saves file) ────────────────────────────────────
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_rfp(file: UploadFile = File(...)):
@@ -39,50 +40,66 @@ async def upload_rfp(file: UploadFile = File(...)):
     return UploadResponse(rfp_id=rfp_id, filename=file.filename, status="uploaded")
 
 
-# ─── Parse: async job — returns job_id immediately ──────────────────────────
+# ─── Parse: async background job ────────────────────────────────────
+
+def _do_parse_sync(rfp_id: str) -> dict:
+    """
+    Pure synchronous parse logic — runs in a thread pool.
+    Returns a plain dict ready for job_store.
+    """
+    upload_files = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
+    if not upload_files:
+        raise FileNotFoundError(f"RFP file not found for id {rfp_id}")
+
+    parsed_doc = parse_document(str(upload_files[0]))
+    full_text = parsed_doc.get("full_text", "")
+    print(f"[parse] document text length: {len(full_text)} chars")
+
+    extracted = extract_rfp_questions(full_text)
+    raw_questions = extracted.get("questions", [])
+    print(f"[parse] extracted {len(raw_questions)} questions, categories: {extracted.get('categories', [])}")
+
+    questions = [
+        RFPQuestion(
+            question_id=q["question_id"],
+            category=q["category"],
+            question_text=q["question_text"],
+            question_type=q.get("question_type", "qualitative"),
+            weight=float(q.get("weight", 10)),
+            scoring_guidance=q.get("scoring_guidance"),
+        )
+        for q in raw_questions
+    ]
+
+    # Persist for analysis phase
+    meta_path = META_DIR / f"{rfp_id}_questions.json"
+    meta_path.write_text(json.dumps([q.dict() for q in questions]))
+    print(f"[parse] saved {len(questions)} questions to {meta_path}")
+
+    return {
+        "rfp_id": rfp_id,
+        "status": "parsed",
+        "questions": [q.dict() for q in questions],
+        "categories": extracted.get("categories", []),
+        "total_questions": len(questions),
+    }
+
 
 async def _run_parse(rfp_id: str, job_id: str):
     job_store.set_running(job_id)
     try:
-        upload_files = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
-        if not upload_files:
-            job_store.set_failed(job_id, "RFP file not found")
-            return
-
-        loop = asyncio.get_event_loop()
-        parsed_doc = await loop.run_in_executor(_executor, parse_document, str(upload_files[0]))
-        extracted = await loop.run_in_executor(_executor, extract_rfp_questions, parsed_doc["full_text"])
-
-        questions = [
-            RFPQuestion(
-                question_id=q["question_id"],
-                category=q["category"],
-                question_text=q["question_text"],
-                question_type=q.get("question_type", "qualitative"),
-                weight=float(q.get("weight", 10)),
-                scoring_guidance=q.get("scoring_guidance"),
-            )
-            for q in extracted.get("questions", [])
-        ]
-
-        meta_path = META_DIR / f"{rfp_id}_questions.json"
-        meta_path.write_text(json.dumps([q.dict() for q in questions]))
-
-        result = ParseResponse(
-            rfp_id=rfp_id,
-            status="parsed",
-            questions=questions,
-            categories=extracted.get("categories", []),
-            total_questions=len(questions),
-        )
-        job_store.set_completed(job_id, result.dict())
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(_executor, _do_parse_sync, rfp_id)
+        job_store.set_completed(job_id, result)
     except Exception as e:
+        error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        print(f"[parse ERROR] job {job_id}: {error_detail}")
         job_store.set_failed(job_id, str(e))
 
 
 @router.post("/{rfp_id}/parse")
 async def parse_rfp(rfp_id: str, background_tasks: BackgroundTasks):
-    """Start parsing in background. Poll GET /rfp/parse-status/{job_id} for result."""
+    """Kick off background parse. Poll GET /rfp/parse-status/{job_id} for completion."""
     job_id = job_store.create()
     background_tasks.add_task(_run_parse, rfp_id, job_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
@@ -101,7 +118,7 @@ async def get_parse_status(job_id: str):
     }
 
 
-# ─── Supplier upload (fast — just saves file) ────────────────────────────────
+# ─── Supplier upload (fast — just saves file) ──────────────────────────────
 
 @router.post("/{rfp_id}/supplier", response_model=dict)
 async def upload_supplier_response(rfp_id: str, file: UploadFile = File(...)):
