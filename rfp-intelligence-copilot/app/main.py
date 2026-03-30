@@ -8,8 +8,9 @@ from app.api.routes.scenarios import router as scenarios_router
 from app.api.routes.communications import router as communications_router
 from app.api.routes.chat import router as chat_router
 from app.api.routes.pricing import router as pricing_router
+from app.api.routes.projects import router as projects_router
 
-app = FastAPI(title="RFP Intelligence Copilot", version="1.0.0")
+app = FastAPI(title="RFP Intelligence Copilot", version="1.1.0")
 
 origins = [
     "*"  # change this in production!
@@ -25,6 +26,7 @@ app.add_middleware(
 
 # Routers
 app.include_router(health_router)
+app.include_router(projects_router,       prefix="/projects",       tags=["Projects"])
 app.include_router(rfp_router,            prefix="/rfp",            tags=["RFP"])
 app.include_router(analysis_router,       prefix="/analysis",       tags=["Analysis"])
 app.include_router(scenarios_router,      prefix="/scenarios",      tags=["Scenarios"])
@@ -37,5 +39,17 @@ app.include_router(pricing_router,        prefix="/pricing",        tags=["Prici
 def root():
     return {
         "message": "RFP Intelligence Copilot API is running",
-        "endpoints": ["/health", "/rfp/upload", "/chat/message", "/pricing/analyze", "/docs"]
+        "version": "1.1.0",
+        "endpoints": [
+            "/health",
+            "/projects",
+            "/projects/{id}/rfp",
+            "/projects/{id}/supplier",
+            "/projects/{id}/parse",
+            "/projects/{id}/analyze",
+            "/rfp/upload",
+            "/chat/message",
+            "/pricing/analyze",
+            "/docs",
+        ],
     }

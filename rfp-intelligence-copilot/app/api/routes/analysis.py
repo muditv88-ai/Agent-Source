@@ -1,187 +1,126 @@
-import json
 import asyncio
+import json
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
-from typing import Optional
-from app.models.schemas import AnalysisRequest, AnalysisResponse, SupplierResult, CategoryScore, QuestionScore
-from app.services.document_parser import parse_document
-from app.services.supplier_parser import extract_supplier_answers
-from app.services.ai_scorer import score_question, generate_supplier_summary
-from app.services.aggregator import aggregate_scores, compute_overall_score
+from fastapi.responses import FileResponse
+from app.models.schemas import AnalysisRequest
 from app.services.job_store import job_store, JobStatus
+from app.services.supplier_parser import parse_supplier_responses
+from app.services.aggregator import aggregate_scores
+from app.services.ai_scorer import score_suppliers
 
 router = APIRouter()
+_executor = ThreadPoolExecutor(max_workers=10)
 
 UPLOAD_DIR = Path("uploads")
-META_DIR = Path("metadata")
-
-_executor = ThreadPoolExecutor(max_workers=10)
-_api_semaphore = asyncio.Semaphore(5)
+META_DIR   = Path("metadata")
 
 
-class JobStartResponse(BaseModel):
-    job_id: str
-    status: str
-
-
-class JobStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    result: Optional[dict] = None
-    error: Optional[str] = None
-
-
-def _run_in_thread(fn, *args):
-    loop = asyncio.get_event_loop()
-    return loop.run_in_executor(_executor, fn, *args)
-
-
-async def _parse_supplier(sf: Path, questions: list) -> tuple:
-    async with _api_semaphore:
-        parsed = await _run_in_thread(parse_document, str(sf))
-        supplier_data = await _run_in_thread(extract_supplier_answers, parsed["full_text"], questions)
-    name = supplier_data.get("supplier_name", sf.stem)
-    answers = supplier_data.get("answers", {})
-    return name, answers
-
-
-async def _score_one(q: dict, answer: str, context) -> tuple:
-    async with _api_semaphore:
-        result = await _run_in_thread(score_question, q, answer, context)
-    return q["question_id"], result
-
-
-async def _process_supplier(supplier_name: str, answers: dict, questions: list, quant_context: dict) -> dict:
-    score_tasks = [
-        _score_one(
-            q,
-            answers.get(q["question_id"], "No response provided"),
-            quant_context.get(q["question_id"]) if q["question_type"] == "quantitative" else None,
+def _resolve_rfp_files(rfp_id: str, project_id: str = None):
+    """
+    Resolve file paths for analysis.
+    If project_id is provided (project-based flow), files come from projects/<project_id>/.
+    Otherwise fall back to legacy flat uploads/ + metadata/ directories.
+    """
+    if project_id:
+        from app.services.project_store import (
+            get_rfp_path, get_supplier_paths, get_questions_path, get_suppliers_meta_path
         )
-        for q in questions
-    ]
-    scored_pairs = await asyncio.gather(*score_tasks)
-    question_scores = dict(scored_pairs)
-
-    category_results = aggregate_scores(questions, question_scores, answers, supplier_name)
-    overall = compute_overall_score(category_results, questions)
-
-    async with _api_semaphore:
-        summary = await _run_in_thread(generate_supplier_summary, supplier_name, category_results, overall)
-
-    return {
-        "supplier_name": supplier_name,
-        "overall_score": overall,
-        "category_results": category_results,
-        "strengths": summary.get("strengths", []),
-        "weaknesses": summary.get("weaknesses", []),
-        "recommendation": summary.get("recommendation", ""),
-    }
+        rfp_path      = get_rfp_path(project_id)
+        supplier_paths = get_supplier_paths(project_id)
+        questions_path = get_questions_path(project_id)
+        suppliers_meta = get_suppliers_meta_path(project_id)
+        return rfp_path, supplier_paths, questions_path, suppliers_meta
+    else:
+        # Legacy flat-file flow
+        rfp_files = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
+        rfp_path  = rfp_files[0] if rfp_files else None
+        supplier_paths = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
+        questions_path = META_DIR / f"{rfp_id}_questions.json"
+        suppliers_meta = META_DIR / f"{rfp_id}_suppliers.json"
+        return rfp_path, supplier_paths, questions_path, suppliers_meta
 
 
-async def _run_full_analysis(rfp_id: str, job_id: str):
-    """The actual analysis logic — runs in background, writes result to job_store."""
+def _do_analysis(rfp_id: str, project_id: str = None) -> dict:
+    rfp_path, supplier_paths, questions_path, suppliers_meta_path = _resolve_rfp_files(rfp_id, project_id)
+
+    if not rfp_path or not rfp_path.exists():
+        raise FileNotFoundError(f"RFP file not found for rfp_id={rfp_id}")
+    if not supplier_paths:
+        raise FileNotFoundError("No supplier files found")
+    if not questions_path.exists():
+        raise FileNotFoundError("Parsed questions not found — please parse the RFP first")
+
+    questions = json.loads(questions_path.read_text())
+
+    # Load supplier name mapping
+    supplier_names: dict = {}
+    if suppliers_meta_path.exists():
+        supplier_names = json.loads(suppliers_meta_path.read_text())
+
+    supplier_data = parse_supplier_responses(
+        [str(p) for p in supplier_paths],
+        questions,
+        supplier_names,
+    )
+    scored = score_suppliers(supplier_data, questions)
+    result = aggregate_scores(scored, rfp_id)
+    return result
+
+
+async def _run_analysis_job(rfp_id: str, job_id: str, project_id: str = None):
     job_store.set_running(job_id)
     try:
-        meta_path = META_DIR / f"{rfp_id}_questions.json"
-        if not meta_path.exists():
-            job_store.set_failed(job_id, "RFP not parsed yet. Call /rfp/{rfp_id}/parse first.")
-            return
-
-        questions = json.loads(meta_path.read_text())
-
-        supplier_files = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
-        if not supplier_files:
-            job_store.set_failed(job_id, "No supplier responses uploaded for this RFP.")
-            return
-
-        parse_tasks = [_parse_supplier(sf, questions) for sf in supplier_files]
-        parsed_suppliers = await asyncio.gather(*parse_tasks)
-        all_suppliers_raw = {name: answers for name, answers in parsed_suppliers}
-
-        quant_context = {}
-        for q in questions:
-            if q["question_type"] == "quantitative":
-                qid = q["question_id"]
-                quant_context[qid] = {
-                    name: answers.get(qid, "No response")
-                    for name, answers in all_suppliers_raw.items()
-                }
-
-        supplier_tasks = [
-            _process_supplier(name, answers, questions, quant_context)
-            for name, answers in all_suppliers_raw.items()
-        ]
-        supplier_results = list(await asyncio.gather(*supplier_tasks))
-        supplier_results.sort(key=lambda x: x["overall_score"], reverse=True)
-
-        formatted_suppliers = []
-        for rank, s in enumerate(supplier_results, 1):
-            cat_scores = [
-                CategoryScore(
-                    category=c["category"],
-                    weighted_score=c["weighted_score"],
-                    question_count=c["question_count"],
-                    questions=[QuestionScore(**q) for q in c["questions"]],
-                )
-                for c in s["category_results"]
-            ]
-            formatted_suppliers.append(
-                SupplierResult(
-                    supplier_id=f"supplier_{rank}",
-                    supplier_name=s["supplier_name"],
-                    overall_score=s["overall_score"],
-                    rank=rank,
-                    category_scores=cat_scores,
-                    strengths=s["strengths"],
-                    weaknesses=s["weaknesses"],
-                    recommendation=s["recommendation"],
-                )
-            )
-
-        top = formatted_suppliers[0] if formatted_suppliers else None
-        top_rec = (
-            f"{top.supplier_name} is the top-ranked supplier with a score of {top.overall_score:.1f}/10."
-            if top else "No suppliers evaluated."
+        loop   = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            _executor, lambda: _do_analysis(rfp_id, project_id)
         )
-
-        result = AnalysisResponse(
-            rfp_id=rfp_id,
-            status="completed",
-            suppliers=formatted_suppliers,
-            top_recommendation=top_rec,
-            analysis_summary=(
-                f"Evaluated {len(formatted_suppliers)} supplier(s) across "
-                f"{len(set(q['category'] for q in questions))} categories "
-                f"and {len(questions)} questions."
-            ),
-        )
-        # Serialise via pydantic so job_store holds plain dict
-        job_store.set_completed(job_id, result.model_dump())
-
+        job_store.set_completed(job_id, result)
     except Exception as e:
-        job_store.set_failed(job_id, str(e))
+        job_store.set_failed(job_id, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
-@router.post("/run", response_model=JobStartResponse)
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.post("/run")
 async def run_analysis(req: AnalysisRequest, background_tasks: BackgroundTasks):
-    """Start analysis in the background. Returns job_id immediately."""
+    """Legacy flat-file analysis (rfp_id based). Still works as before."""
     job_id = job_store.create()
-    background_tasks.add_task(_run_full_analysis, req.rfp_id, job_id)
-    return JobStartResponse(job_id=job_id, status=JobStatus.PENDING)
+    background_tasks.add_task(_run_analysis_job, req.rfp_id, job_id)
+    return {"job_id": job_id, "status": JobStatus.PENDING}
 
 
-@router.get("/status/{job_id}", response_model=JobStatusResponse)
+@router.get("/status/{job_id}")
 async def get_analysis_status(job_id: str):
-    """Poll this endpoint. Returns status + result when completed."""
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return JobStatusResponse(
-        job_id=job_id,
-        status=job["status"],
-        result=job.get("result"),
-        error=job.get("error"),
-    )
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job.get("result"),
+        "error":  job.get("error"),
+    }
+
+
+@router.get("/export/{rfp_id}")
+async def export_analysis(rfp_id: str, format: str = "json"):
+    export_dir = Path("exports")
+    export_dir.mkdir(exist_ok=True)
+
+    if format == "json":
+        job = next(
+            (j for j in job_store._store.values()
+             if j.get("status") == "completed" and
+             j.get("result", {}).get("rfp_id") == rfp_id),
+            None,
+        )
+        if not job:
+            raise HTTPException(status_code=404, detail="Analysis result not found")
+        path = export_dir / f"{rfp_id}_analysis.json"
+        path.write_text(json.dumps(job["result"], indent=2))
+        return FileResponse(str(path), filename=f"{rfp_id}_analysis.json")
+
+    raise HTTPException(status_code=400, detail=f"Unsupported format: {format}")
