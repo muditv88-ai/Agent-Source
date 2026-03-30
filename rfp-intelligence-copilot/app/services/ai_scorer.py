@@ -17,20 +17,15 @@ You are an expert procurement evaluator. Score a supplier's answer to an RFP que
 
 Scoring rules:
 - Score from 0 to 10 (decimals allowed)
-- For QUANTITATIVE questions (price, date, number, percentage):
-  * Lower price = higher score, faster delivery = higher score
-  * Be precise and reference the actual numbers
-- For QUALITATIVE questions (approach, experience, methodology):
+- For QUANTITATIVE questions: lower price = higher score, faster delivery = higher score
+- For QUALITATIVE questions:
   * 0-3: Vague or no response
   * 4-6: Adequate but generic
   * 7-9: Strong with specific evidence
-  * 10: Exceptional, best-in-class response
+  * 10: Exceptional, best-in-class
 
-Return ONLY valid JSON, no explanation:
-{
-  "score": 7.5,
-  "rationale": "Explanation referencing the actual answer..."
-}
+Return ONLY this JSON, nothing else:
+{"score": 7.5, "rationale": "one sentence explanation"}
 """
 
 
@@ -44,20 +39,39 @@ def _extract_content(response) -> str:
 
 
 def _parse_json(raw: str) -> Dict:
+    """Parse JSON robustly, recovering from truncation and markdown fences."""
+    raw = raw.strip()
+    # Strip markdown fences
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw)
+    raw = raw.strip()
+
+    # Direct parse
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
-    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
-    raw = re.sub(r"\s*```$", "", raw.strip())
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r"(\{.*\})", raw, re.DOTALL)
+
+    # Find first complete {...} block
+    match = re.search(r"(\{[^{}]*\})", raw, re.DOTALL)
     if match:
-        return json.loads(match.group(1))
-    raise ValueError(f"Could not parse JSON from response: {raw[:500]}")
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Try to recover truncated JSON by closing open braces
+    if raw.startswith("{") and not raw.endswith("}"):
+        # Extract what we can with regex for score and rationale
+        score_match = re.search(r'"score"\s*:\s*([\d.]+)', raw)
+        rationale_match = re.search(r'"rationale"\s*:\s*"([^"]*)', raw)
+        if score_match:
+            return {
+                "score": float(score_match.group(1)),
+                "rationale": rationale_match.group(1) if rationale_match else "See evaluation."
+            }
+
+    raise ValueError(f"Could not parse JSON from response: {raw[:300]}")
 
 
 def score_question(
@@ -76,7 +90,7 @@ def score_question(
         f"Type: {question['question_type']}\n"
         f"Weight: {question['weight']}%\n"
         f"Scoring Guidance: {question.get('scoring_guidance', 'None')}\n"
-        f"Supplier Answer: {supplier_answer}"
+        f"Supplier Answer: {supplier_answer[:500]}"
         f"{context}"
     )
 
@@ -87,7 +101,7 @@ def score_question(
             {"role": "user", "content": f"{SCORING_SYSTEM_PROMPT}\n\n{prompt}"},
         ],
         temperature=0.1,
-        max_tokens=1024,
+        max_tokens=256,
     )
     return _parse_json(_extract_content(response))
 
@@ -105,9 +119,8 @@ def generate_supplier_summary(
         f"Supplier: {supplier_name}\n"
         f"Overall Score: {overall_score:.1f}/10\n"
         f"Category Scores:\n{scores_text}\n\n"
-        "Provide top 3 strengths, top 3 weaknesses, "
-        "and one sentence recommendation (award / consider / reject). "
-        "Return ONLY JSON with keys: strengths (list), weaknesses (list), recommendation (string)."
+        "Return ONLY JSON with keys: strengths (list of 3 short strings), "
+        "weaknesses (list of 3 short strings), recommendation (one sentence string)."
     )
 
     response = client.chat.completions.create(
@@ -117,6 +130,6 @@ def generate_supplier_summary(
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=512,
     )
     return _parse_json(_extract_content(response))
