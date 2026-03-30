@@ -1,10 +1,17 @@
-"""Uses LLM to extract structured questions from any RFP document."""
+"""Uses Gemini to extract structured questions from any RFP document."""
 import os
 import json
-from openai import OpenAI
-from typing import List, Dict, Any
+import google.generativeai as genai
+from typing import Dict, Any
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+_model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    generation_config=genai.GenerationConfig(
+        response_mime_type="application/json",
+        temperature=0.1,
+    ),
+)
 
 SYSTEM_PROMPT = """
 You are an expert procurement analyst. Your job is to extract all evaluation questions
@@ -15,7 +22,7 @@ For each question or evaluation criterion, extract:
 - category: the category or section it belongs to (e.g. "Technical", "Pricing", "Compliance")
 - question_text: the full text of the question or criterion
 - question_type: "quantitative" if it expects a number/price/date/percentage, otherwise "qualitative"
-- weight: importance weight as a number 0-100. If not specified, distribute evenly.
+- weight: importance weight as a number 0-100. If not specified, distribute evenly across all questions.
 - scoring_guidance: any guidance on how to score it, or null
 
 Return a JSON object with:
@@ -29,19 +36,14 @@ Only return valid JSON. No explanation.
 
 
 def extract_rfp_questions(document_text: str) -> Dict[str, Any]:
-    """Extract structured questions from RFP document text using GPT-4o."""
-    # Truncate to avoid token limits (keep first 12k chars)
+    """Extract structured questions from RFP document text using Gemini."""
     truncated = document_text[:12000]
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Extract all evaluation questions from this RFP:\n\n{truncated}"},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"Extract all evaluation questions from this RFP:\n\n{truncated}"
     )
 
-    result = json.loads(response.choices[0].message.content)
+    response = _model.generate_content(prompt)
+    result = json.loads(response.text)
     return result

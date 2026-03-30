@@ -2,7 +2,7 @@ fastapi[all]
 pandas
 openpyxl
 python-multipart
-openai
 pdfplumber
 python-docx
 httpx
+google-generativeai

@@ -1,10 +1,17 @@
-"""Agentic AI scorer - scores each question with rationale for quant and qual."""
+"""Agentic AI scorer using Gemini - scores each question with rationale."""
 import os
 import json
-from openai import OpenAI
+import google.generativeai as genai
 from typing import List, Dict, Any
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+_model = genai.GenerativeModel(
+    model_name="gemini-1.5-flash",
+    generation_config=genai.GenerationConfig(
+        response_mime_type="application/json",
+        temperature=0.1,
+    ),
+)
 
 SCORING_SYSTEM_PROMPT = """
 You are an expert procurement evaluator. Score a supplier's answer to an RFP question.
@@ -40,12 +47,12 @@ def score_question(
     """Score a single question for one supplier with full rationale."""
     context = ""
     if all_supplier_answers and question["question_type"] == "quantitative":
-        # Provide all suppliers' answers for relative quantitative scoring
         context = "\nOther suppliers' answers for context:\n"
         for supplier, answer in all_supplier_answers.items():
             context += f"- {supplier}: {answer}\n"
 
     prompt = (
+        f"{SCORING_SYSTEM_PROMPT}\n\n"
         f"Question: {question['question_text']}\n"
         f"Type: {question['question_type']}\n"
         f"Weight: {question['weight']}%\n"
@@ -54,17 +61,8 @@ def score_question(
         f"{context}"
     )
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SCORING_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.1,
-    )
-
-    return json.loads(response.choices[0].message.content)
+    response = _model.generate_content(prompt)
+    return json.loads(response.text)
 
 
 def generate_supplier_summary(
@@ -78,26 +76,14 @@ def generate_supplier_summary(
     )
 
     prompt = (
+        "You are a procurement advisor. Return JSON with keys: "
+        "strengths (list of 3 strings), weaknesses (list of 3 strings), recommendation (string).\n\n"
         f"Supplier: {supplier_name}\n"
         f"Overall Score: {overall_score:.1f}/10\n"
         f"Category Scores:\n{scores_text}\n\n"
-        "Based on these scores, provide:\n"
-        "1. Top 3 strengths\n"
-        "2. Top 3 weaknesses\n"
-        "3. One sentence recommendation (award / consider / reject)"
+        "Based on these scores, provide top 3 strengths, top 3 weaknesses, "
+        "and one sentence recommendation (award / consider / reject)."
     )
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a procurement advisor. Return JSON with keys: strengths (list), weaknesses (list), recommendation (string).",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.2,
-    )
-
-    return json.loads(response.choices[0].message.content)
+    response = _model.generate_content(prompt)
+    return json.loads(response.text)
