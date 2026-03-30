@@ -14,33 +14,34 @@ router = APIRouter()
 UPLOAD_DIR = Path("uploads")
 META_DIR = Path("metadata")
 
-# Thread pool for running blocking IO-bound AI calls concurrently
-_executor = ThreadPoolExecutor(max_workers=20)
+# Thread pool for blocking AI calls
+_executor = ThreadPoolExecutor(max_workers=10)
+
+# Semaphore: max 5 concurrent NVIDIA API calls at a time to avoid 429s
+_api_semaphore = asyncio.Semaphore(5)
 
 
 def _run_in_thread(fn, *args):
-    """Schedule a blocking function in the thread pool and return a coroutine."""
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(_executor, fn, *args)
 
 
 async def _parse_supplier(sf: Path, questions: list) -> tuple:
-    """Parse one supplier file and extract answers — runs in thread pool."""
-    parsed = await _run_in_thread(parse_document, str(sf))
-    supplier_data = await _run_in_thread(extract_supplier_answers, parsed["full_text"], questions)
+    async with _api_semaphore:
+        parsed = await _run_in_thread(parse_document, str(sf))
+        supplier_data = await _run_in_thread(extract_supplier_answers, parsed["full_text"], questions)
     name = supplier_data.get("supplier_name", sf.stem)
     answers = supplier_data.get("answers", {})
     return name, answers
 
 
 async def _score_one(q: dict, answer: str, context) -> tuple:
-    """Score a single question in thread pool."""
-    result = await _run_in_thread(score_question, q, answer, context)
+    async with _api_semaphore:
+        result = await _run_in_thread(score_question, q, answer, context)
     return q["question_id"], result
 
 
 async def _process_supplier(supplier_name: str, answers: dict, questions: list, quant_context: dict) -> dict:
-    """Score all questions for one supplier in parallel."""
     score_tasks = [
         _score_one(
             q,
@@ -54,7 +55,9 @@ async def _process_supplier(supplier_name: str, answers: dict, questions: list, 
 
     category_results = aggregate_scores(questions, question_scores, answers, supplier_name)
     overall = compute_overall_score(category_results, questions)
-    summary = await _run_in_thread(generate_supplier_summary, supplier_name, category_results, overall)
+
+    async with _api_semaphore:
+        summary = await _run_in_thread(generate_supplier_summary, supplier_name, category_results, overall)
 
     return {
         "supplier_name": supplier_name,
@@ -82,13 +85,13 @@ async def run_analysis(req: AnalysisRequest):
     if not supplier_files:
         raise HTTPException(status_code=404, detail="No supplier responses uploaded for this RFP.")
 
-    # 3. Parse ALL supplier documents in parallel
+    # 3. Parse ALL supplier documents in parallel (rate-limited)
     parse_tasks = [_parse_supplier(sf, questions) for sf in supplier_files]
     parsed_suppliers = await asyncio.gather(*parse_tasks)
 
     all_suppliers_raw = {name: answers for name, answers in parsed_suppliers}
 
-    # 4. Build quantitative context (all supplier answers per quant question)
+    # 4. Build quantitative context
     quant_context = {}
     for q in questions:
         if q["question_type"] == "quantitative":
@@ -98,13 +101,12 @@ async def run_analysis(req: AnalysisRequest):
                 for name, answers in all_suppliers_raw.items()
             }
 
-    # 5. Score ALL suppliers in parallel (each supplier scores all its questions in parallel too)
+    # 5. Score ALL suppliers in parallel (each question also parallel, both rate-limited)
     supplier_tasks = [
         _process_supplier(name, answers, questions, quant_context)
         for name, answers in all_suppliers_raw.items()
     ]
-    supplier_results = await asyncio.gather(*supplier_tasks)
-    supplier_results = list(supplier_results)
+    supplier_results = list(await asyncio.gather(*supplier_tasks))
 
     # 6. Rank suppliers
     supplier_results.sort(key=lambda x: x["overall_score"], reverse=True)
