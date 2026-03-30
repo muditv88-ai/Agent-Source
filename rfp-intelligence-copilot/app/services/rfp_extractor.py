@@ -1,11 +1,15 @@
-"""Uses Gemini to extract structured questions from any RFP document."""
+"""Uses NVIDIA Nemotron to extract structured questions from any RFP document."""
 import os
 import json
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from typing import Dict, Any
 
-_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=os.environ.get("NVIDIA_API_KEY"),
+)
+
+MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
 
 SYSTEM_PROMPT = """
 You are an expert procurement analyst. Your job is to extract all evaluation questions
@@ -30,16 +34,23 @@ Only return valid JSON. No explanation.
 
 
 def extract_rfp_questions(document_text: str) -> Dict[str, Any]:
-    """Extract structured questions from RFP document text using Gemini."""
+    """Extract structured questions from RFP document text using Nemotron."""
     truncated = document_text[:12000]
 
-    response = _client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=f"{SYSTEM_PROMPT}\n\nExtract all evaluation questions from this RFP:\n\n{truncated}",
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Extract all evaluation questions from this RFP:\n\n{truncated}"},
+        ],
+        temperature=0.1,
+        max_tokens=4096,
     )
 
-    return json.loads(response.text)
+    content = response.choices[0].message.content.strip()
+    # Strip markdown code fences if present
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    return json.loads(content.strip())

@@ -1,11 +1,15 @@
-"""Agentic AI scorer using Gemini - scores each question with rationale."""
+"""Agentic AI scorer using NVIDIA Nemotron - scores each question with rationale."""
 import os
 import json
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from typing import List, Dict, Any
 
-_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+client = OpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=os.environ.get("NVIDIA_API_KEY"),
+)
+
+MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
 
 SCORING_SYSTEM_PROMPT = """
 You are an expert procurement evaluator. Score a supplier's answer to an RFP question.
@@ -23,14 +27,21 @@ Scoring rules:
   * 7-9: Strong with specific evidence
   * 10: Exceptional, best-in-class response
 
-Return JSON:
+Return JSON only, no explanation:
 {
   "score": 7.5,
   "rationale": "Detailed explanation referencing the actual answer..."
 }
-
-Only return valid JSON.
 """
+
+
+def _parse_json(content: str) -> Dict:
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.split("```")[1]
+        if content.startswith("json"):
+            content = content[4:]
+    return json.loads(content.strip())
 
 
 def score_question(
@@ -46,7 +57,6 @@ def score_question(
             context += f"- {supplier}: {answer}\n"
 
     prompt = (
-        f"{SCORING_SYSTEM_PROMPT}\n\n"
         f"Question: {question['question_text']}\n"
         f"Type: {question['question_type']}\n"
         f"Weight: {question['weight']}%\n"
@@ -55,15 +65,16 @@ def score_question(
         f"{context}"
     )
 
-    response = _client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.1,
-        ),
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SCORING_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1024,
     )
-    return json.loads(response.text)
+    return _parse_json(response.choices[0].message.content)
 
 
 def generate_supplier_summary(
@@ -77,21 +88,21 @@ def generate_supplier_summary(
     )
 
     prompt = (
-        "You are a procurement advisor. Return JSON with keys: "
-        "strengths (list of 3 strings), weaknesses (list of 3 strings), recommendation (string).\n\n"
         f"Supplier: {supplier_name}\n"
         f"Overall Score: {overall_score:.1f}/10\n"
         f"Category Scores:\n{scores_text}\n\n"
         "Provide top 3 strengths, top 3 weaknesses, "
-        "and one sentence recommendation (award / consider / reject)."
+        "and one sentence recommendation (award / consider / reject). "
+        "Return JSON with keys: strengths (list), weaknesses (list), recommendation (string)."
     )
 
-    response = _client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-        ),
+    response = client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": "You are a procurement advisor. Return only valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=1024,
     )
-    return json.loads(response.text)
+    return _parse_json(response.choices[0].message.content)
