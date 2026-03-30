@@ -5,7 +5,8 @@ import asyncio
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Form
+from typing import Optional
 from app.models.schemas import UploadResponse, ParseResponse, RFPQuestion
 from app.services.document_parser import parse_document
 from app.services.rfp_extractor import extract_rfp_questions
@@ -23,7 +24,7 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".pdf", ".docx"}
 _executor = ThreadPoolExecutor(max_workers=10)
 
 
-# ─── Upload (fast — just saves file) ────────────────────────────────────
+# ─── Upload (fast — just saves file) ────────────────────────────────────────
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_rfp(file: UploadFile = File(...)):
@@ -40,13 +41,9 @@ async def upload_rfp(file: UploadFile = File(...)):
     return UploadResponse(rfp_id=rfp_id, filename=file.filename, status="uploaded")
 
 
-# ─── Parse: async background job ────────────────────────────────────
+# ─── Parse: async background job ─────────────────────────────────────────
 
 def _do_parse_sync(rfp_id: str) -> dict:
-    """
-    Pure synchronous parse logic — runs in a thread pool.
-    Returns a plain dict ready for job_store.
-    """
     upload_files = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
     if not upload_files:
         raise FileNotFoundError(f"RFP file not found for id {rfp_id}")
@@ -71,7 +68,6 @@ def _do_parse_sync(rfp_id: str) -> dict:
         for q in raw_questions
     ]
 
-    # Persist for analysis phase
     meta_path = META_DIR / f"{rfp_id}_questions.json"
     meta_path.write_text(json.dumps([q.dict() for q in questions]))
     print(f"[parse] saved {len(questions)} questions to {meta_path}")
@@ -99,7 +95,6 @@ async def _run_parse(rfp_id: str, job_id: str):
 
 @router.post("/{rfp_id}/parse")
 async def parse_rfp(rfp_id: str, background_tasks: BackgroundTasks):
-    """Kick off background parse. Poll GET /rfp/parse-status/{job_id} for completion."""
     job_id = job_store.create()
     background_tasks.add_task(_run_parse, rfp_id, job_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
@@ -118,15 +113,35 @@ async def get_parse_status(job_id: str):
     }
 
 
-# ─── Supplier upload (fast — just saves file) ──────────────────────────────
+# ─── Supplier upload ─────────────────────────────────────────────────────────────────
 
 @router.post("/{rfp_id}/supplier", response_model=dict)
-async def upload_supplier_response(rfp_id: str, file: UploadFile = File(...)):
+async def upload_supplier_response(
+    rfp_id: str,
+    file: UploadFile = File(...),
+    supplier_name: Optional[str] = Form(None),
+):
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}")
+
     supplier_id = str(uuid.uuid4())
     dest_path = UPLOAD_DIR / f"{rfp_id}_supplier_{supplier_id}{suffix}"
     with dest_path.open("wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
-    return {"rfp_id": rfp_id, "supplier_id": supplier_id, "status": "uploaded"}
+
+    # ── Derive supplier name: form field > original filename stem > uuid
+    if not supplier_name or not supplier_name.strip():
+        # Use original filename without extension as fallback
+        supplier_name = Path(file.filename).stem.strip() or supplier_id
+
+    # Persist supplier name mapping so pricing job can look it up
+    suppliers_meta_path = META_DIR / f"{rfp_id}_suppliers.json"
+    if suppliers_meta_path.exists():
+        suppliers_meta = json.loads(suppliers_meta_path.read_text())
+    else:
+        suppliers_meta = {}
+    suppliers_meta[str(dest_path)] = supplier_name
+    suppliers_meta_path.write_text(json.dumps(suppliers_meta))
+
+    return {"rfp_id": rfp_id, "supplier_id": supplier_id, "supplier_name": supplier_name, "status": "uploaded"}

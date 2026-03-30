@@ -29,24 +29,21 @@ UPLOAD_DIR = Path("uploads")
 META_DIR   = Path("metadata")
 
 _executor      = ThreadPoolExecutor(max_workers=4)
-_api_semaphore = asyncio.Semaphore(2)  # reduced to 2 to avoid rate limits
+_api_semaphore = asyncio.Semaphore(2)
 
 
 # ── Request / Response models ─────────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
     rfp_id: str
 
-
 class PricingCorrectionRequest(BaseModel):
     rfp_id: str
     supplier_name: str
     corrections: list[dict]
 
-
 class JobStartResponse(BaseModel):
     job_id: str
     status: str
-
 
 class JobStatusResponse(BaseModel):
     job_id: str
@@ -55,12 +52,8 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Retry helper ─────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
-    """
-    Call fn(*args) with exponential backoff on rate-limit (429) errors.
-    Doubles the delay on each retry: 15s, 30s, 60s, 120s.
-    """
     last_err = None
     delay = base_delay
     for attempt in range(max_retries + 1):
@@ -68,8 +61,7 @@ def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
             return fn(*args)
         except Exception as e:
             msg = str(e).lower()
-            is_rate_limit = "429" in msg or "rate limit" in msg or "too many requests" in msg
-            if is_rate_limit and attempt < max_retries:
+            if ("429" in msg or "rate limit" in msg or "too many requests" in msg) and attempt < max_retries:
                 last_err = e
                 time.sleep(delay)
                 delay *= 2
@@ -78,12 +70,20 @@ def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
     raise last_err
 
 
-# ── Background job ───────────────────────────────────────────────────────────────
+def _load_supplier_names(rfp_id: str) -> dict:
+    """Load file_path -> supplier_name mapping saved during upload."""
+    meta_path = META_DIR / f"{rfp_id}_suppliers.json"
+    if meta_path.exists():
+        return json.loads(meta_path.read_text())
+    return {}
+
+
 def _run_in_thread(fn, *args):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(_executor, fn, *args)
 
 
+# ── Background job ───────────────────────────────────────────────────────────────
 async def _run_pricing_job(rfp_id: str, job_id: str):
     job_store.set_running(job_id)
     try:
@@ -92,21 +92,32 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
             job_store.set_failed(job_id, "No supplier files found. Upload supplier responses first.")
             return
 
+        # Load name map saved at upload time
+        name_map = _load_supplier_names(rfp_id)
+
         suppliers_pricing = []
         for sf in supplier_files:
+            # Resolve supplier name: saved map > original filename stem > uuid chunk
+            supplier_name = (
+                name_map.get(str(sf))
+                or name_map.get(sf.name)
+                or sf.stem.split("_supplier_")[-1]  # uuid fallback
+            )
+
             async with _api_semaphore:
-                # parse_document may call LLM; wrap with retry on 429
                 parsed = await _run_in_thread(
                     _call_with_retry, parse_document, str(sf)
                 )
-            full_text     = parsed.get("full_text", "")
-            supplier_name = parsed.get("supplier_name") or sf.stem
 
-            # extract_pricing_from_document is pure Python — no LLM calls
-            pricing = extract_pricing_from_document(str(sf), supplier_name, full_text)
+            # Pass the rich full_text from parse_document directly into pricing extractor
+            # This ensures LLM fallback receives proper text (not a re-parse)
+            full_text = parsed.get("full_text", "")
+
+            pricing = extract_pricing_from_document(
+                str(sf), supplier_name, full_text
+            )
             suppliers_pricing.append(pricing)
 
-            # Small gap between suppliers to avoid burst rate limits
             await asyncio.sleep(1)
 
         result = run_pricing_analysis(suppliers_pricing)
@@ -125,7 +136,6 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=JobStartResponse)
 async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: BackgroundTasks):
-    """Start pricing analysis in background. Returns job_id."""
     job_id = job_store.create()
     background_tasks.add_task(_run_pricing_job, req.rfp_id, job_id)
     return JobStartResponse(job_id=job_id, status=JobStatus.PENDING)
@@ -133,7 +143,6 @@ async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: Backgrou
 
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_pricing_status(job_id: str):
-    """Poll job status."""
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -147,7 +156,6 @@ async def get_pricing_status(job_id: str):
 
 @router.get("/result/{rfp_id}")
 async def get_pricing_result(rfp_id: str):
-    """Get latest persisted pricing result for an RFP."""
     result_path = META_DIR / f"{rfp_id}_pricing.json"
     if not result_path.exists():
         raise HTTPException(status_code=404, detail="No pricing result found. Run /pricing/analyze first.")
@@ -156,16 +164,11 @@ async def get_pricing_result(rfp_id: str):
 
 @router.post("/correct")
 async def correct_pricing(req: PricingCorrectionRequest):
-    """
-    Apply user corrections to a supplier's pricing data.
-    Merges corrections into the saved result and re-runs scenarios.
-    """
     result_path = META_DIR / f"{req.rfp_id}_pricing.json"
     if not result_path.exists():
         raise HTTPException(status_code=404, detail="No pricing result found.")
 
     result = json.loads(result_path.read_text())
-
     matrix = result.get("cost_model", {}).get("matrix", {})
     for correction in req.corrections:
         desc = correction.get("description", "").strip()
@@ -200,7 +203,6 @@ async def correct_pricing(req: PricingCorrectionRequest):
 
 @router.get("/export/{rfp_id}")
 async def export_pricing(rfp_id: str, format: str = "xlsx"):
-    """Export pricing analysis as xlsx or csv."""
     if format not in ("xlsx", "csv"):
         raise HTTPException(status_code=400, detail="format must be xlsx or csv")
 
@@ -208,7 +210,7 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
     if not result_path.exists():
         raise HTTPException(status_code=404, detail="No pricing result found.")
 
-    result = json.loads(result_path.read_text())
+    result      = json.loads(result_path.read_text())
     matrix      = result.get("cost_model", {}).get("matrix", {})
     suppliers   = result.get("cost_model", {}).get("suppliers", [])
     total_costs = result.get("total_costs", [])
@@ -239,7 +241,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-
     HEADER_FILL = PatternFill("solid", fgColor="1E3A5F")
     HEADER_FONT = Font(color="FFFFFF", bold=True)
     GREEN_FILL  = PatternFill("solid", fgColor="D4EDDA")
