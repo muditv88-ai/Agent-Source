@@ -1,6 +1,7 @@
 """Agentic AI scorer using NVIDIA Nemotron - scores each question with rationale."""
 import os
 import json
+import re
 from openai import OpenAI
 from typing import List, Dict, Any
 
@@ -17,31 +18,46 @@ You are an expert procurement evaluator. Score a supplier's answer to an RFP que
 Scoring rules:
 - Score from 0 to 10 (decimals allowed)
 - For QUANTITATIVE questions (price, date, number, percentage):
-  * Compare the supplier's value against context of what is good/bad
-  * Lower price = higher score, faster delivery = higher score, etc.
+  * Lower price = higher score, faster delivery = higher score
   * Be precise and reference the actual numbers
 - For QUALITATIVE questions (approach, experience, methodology):
-  * Score based on specificity, relevance, demonstrated capability
   * 0-3: Vague or no response
   * 4-6: Adequate but generic
   * 7-9: Strong with specific evidence
   * 10: Exceptional, best-in-class response
 
-Return JSON only, no explanation:
+Return ONLY valid JSON, no explanation:
 {
   "score": 7.5,
-  "rationale": "Detailed explanation referencing the actual answer..."
+  "rationale": "Explanation referencing the actual answer..."
 }
 """
 
 
-def _parse_json(content: str) -> Dict:
-    content = content.strip()
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-    return json.loads(content.strip())
+def _extract_content(response) -> str:
+    msg = response.choices[0].message
+    if msg.content:
+        return msg.content.strip()
+    if hasattr(msg, "reasoning_content") and msg.reasoning_content:
+        return msg.reasoning_content.strip()
+    return str(msg)
+
+
+def _parse_json(raw: str) -> Dict:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw.strip())
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"(\{.*\})", raw, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    raise ValueError(f"Could not parse JSON from response: {raw[:500]}")
 
 
 def score_question(
@@ -49,7 +65,6 @@ def score_question(
     supplier_answer: str,
     all_supplier_answers: Dict[str, str] = None,
 ) -> Dict[str, Any]:
-    """Score a single question for one supplier with full rationale."""
     context = ""
     if all_supplier_answers and question["question_type"] == "quantitative":
         context = "\nOther suppliers' answers for context:\n"
@@ -68,13 +83,13 @@ def score_question(
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": SCORING_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": "detailed thinking off"},
+            {"role": "user", "content": f"{SCORING_SYSTEM_PROMPT}\n\n{prompt}"},
         ],
         temperature=0.1,
         max_tokens=1024,
     )
-    return _parse_json(response.choices[0].message.content)
+    return _parse_json(_extract_content(response))
 
 
 def generate_supplier_summary(
@@ -82,7 +97,6 @@ def generate_supplier_summary(
     category_scores: List[Dict],
     overall_score: float,
 ) -> Dict[str, Any]:
-    """Generate strengths, weaknesses and recommendation for a supplier."""
     scores_text = "\n".join(
         f"- {c['category']}: {c['weighted_score']:.1f}/10" for c in category_scores
     )
@@ -93,16 +107,16 @@ def generate_supplier_summary(
         f"Category Scores:\n{scores_text}\n\n"
         "Provide top 3 strengths, top 3 weaknesses, "
         "and one sentence recommendation (award / consider / reject). "
-        "Return JSON with keys: strengths (list), weaknesses (list), recommendation (string)."
+        "Return ONLY JSON with keys: strengths (list), weaknesses (list), recommendation (string)."
     )
 
     response = client.chat.completions.create(
         model=MODEL,
         messages=[
-            {"role": "system", "content": "You are a procurement advisor. Return only valid JSON."},
+            {"role": "system", "content": "detailed thinking off"},
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
         max_tokens=1024,
     )
-    return _parse_json(response.choices[0].message.content)
+    return _parse_json(_extract_content(response))
