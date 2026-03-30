@@ -1,17 +1,11 @@
 """Uses Gemini to extract structured questions from any RFP document."""
 import os
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import Dict, Any
 
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config=genai.GenerationConfig(
-        response_mime_type="application/json",
-        temperature=0.1,
-    ),
-)
+_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """
 You are an expert procurement analyst. Your job is to extract all evaluation questions
@@ -39,11 +33,13 @@ def extract_rfp_questions(document_text: str) -> Dict[str, Any]:
     """Extract structured questions from RFP document text using Gemini."""
     truncated = document_text[:12000]
 
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"Extract all evaluation questions from this RFP:\n\n{truncated}"
+    response = _client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=f"{SYSTEM_PROMPT}\n\nExtract all evaluation questions from this RFP:\n\n{truncated}",
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        ),
     )
 
-    response = _model.generate_content(prompt)
-    result = json.loads(response.text)
-    return result
+    return json.loads(response.text)

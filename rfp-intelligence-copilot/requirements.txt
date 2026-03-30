@@ -5,4 +5,4 @@ python-multipart
 pdfplumber
 python-docx
 httpx
-google-generativeai
+google-genai

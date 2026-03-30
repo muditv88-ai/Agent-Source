@@ -1,17 +1,11 @@
 """Agentic AI scorer using Gemini - scores each question with rationale."""
 import os
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import List, Dict, Any
 
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-_model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    generation_config=genai.GenerationConfig(
-        response_mime_type="application/json",
-        temperature=0.1,
-    ),
-)
+_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 SCORING_SYSTEM_PROMPT = """
 You are an expert procurement evaluator. Score a supplier's answer to an RFP question.
@@ -61,7 +55,14 @@ def score_question(
         f"{context}"
     )
 
-    response = _model.generate_content(prompt)
+    response = _client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.1,
+        ),
+    )
     return json.loads(response.text)
 
 
@@ -81,9 +82,16 @@ def generate_supplier_summary(
         f"Supplier: {supplier_name}\n"
         f"Overall Score: {overall_score:.1f}/10\n"
         f"Category Scores:\n{scores_text}\n\n"
-        "Based on these scores, provide top 3 strengths, top 3 weaknesses, "
+        "Provide top 3 strengths, top 3 weaknesses, "
         "and one sentence recommendation (award / consider / reject)."
     )
 
-    response = _model.generate_content(prompt)
+    response = _client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.2,
+        ),
+    )
     return json.loads(response.text)
