@@ -11,6 +11,7 @@ Endpoints:
 import json
 import asyncio
 import io
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -28,11 +29,10 @@ UPLOAD_DIR = Path("uploads")
 META_DIR   = Path("metadata")
 
 _executor      = ThreadPoolExecutor(max_workers=4)
-_api_semaphore = asyncio.Semaphore(3)
+_api_semaphore = asyncio.Semaphore(2)  # reduced to 2 to avoid rate limits
 
 
-# ── Request / Response models ────────────────────────────────────────────────
-
+# ── Request / Response models ─────────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
     rfp_id: str
 
@@ -40,7 +40,7 @@ class PricingAnalyzeRequest(BaseModel):
 class PricingCorrectionRequest(BaseModel):
     rfp_id: str
     supplier_name: str
-    corrections: list[dict]  # [{"description": ..., "unit_price": ..., "quantity": ..., "total": ..., "category": ...}]
+    corrections: list[dict]
 
 
 class JobStartResponse(BaseModel):
@@ -55,8 +55,30 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Background job ────────────────────────────────────────────────────────────
+# ── Retry helper ─────────────────────────────────────────────────────────────────
+def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
+    """
+    Call fn(*args) with exponential backoff on rate-limit (429) errors.
+    Doubles the delay on each retry: 15s, 30s, 60s, 120s.
+    """
+    last_err = None
+    delay = base_delay
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args)
+        except Exception as e:
+            msg = str(e).lower()
+            is_rate_limit = "429" in msg or "rate limit" in msg or "too many requests" in msg
+            if is_rate_limit and attempt < max_retries:
+                last_err = e
+                time.sleep(delay)
+                delay *= 2
+                continue
+            raise
+    raise last_err
 
+
+# ── Background job ───────────────────────────────────────────────────────────────
 def _run_in_thread(fn, *args):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(_executor, fn, *args)
@@ -73,19 +95,23 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
         suppliers_pricing = []
         for sf in supplier_files:
             async with _api_semaphore:
-                parsed = await _run_in_thread(parse_document, str(sf))
+                # parse_document may call LLM; wrap with retry on 429
+                parsed = await _run_in_thread(
+                    _call_with_retry, parse_document, str(sf)
+                )
             full_text     = parsed.get("full_text", "")
             supplier_name = parsed.get("supplier_name") or sf.stem
-            async with _api_semaphore:
-                pricing = await _run_in_thread(
-                    extract_pricing_from_document, str(sf), supplier_name, full_text
-                )
+
+            # extract_pricing_from_document is pure Python — no LLM calls
+            pricing = extract_pricing_from_document(str(sf), supplier_name, full_text)
             suppliers_pricing.append(pricing)
+
+            # Small gap between suppliers to avoid burst rate limits
+            await asyncio.sleep(1)
 
         result = run_pricing_analysis(suppliers_pricing)
         result["rfp_id"] = rfp_id
 
-        # Persist result to metadata for correction + export endpoints
         result_path = META_DIR / f"{rfp_id}_pricing.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(json.dumps(result, default=str))
@@ -96,8 +122,7 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
         job_store.set_failed(job_id, str(e))
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
+# ── Routes ─────────────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=JobStartResponse)
 async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: BackgroundTasks):
     """Start pricing analysis in background. Returns job_id."""
@@ -141,7 +166,6 @@ async def correct_pricing(req: PricingCorrectionRequest):
 
     result = json.loads(result_path.read_text())
 
-    # Apply corrections to cost_model matrix
     matrix = result.get("cost_model", {}).get("matrix", {})
     for correction in req.corrections:
         desc = correction.get("description", "").strip()
@@ -152,7 +176,6 @@ async def correct_pricing(req: PricingCorrectionRequest):
                     if k in ("unit_price", "quantity", "total", "category", "notes") and v is not None
                 })
 
-    # Re-derive suppliers_pricing from matrix for re-analysis
     suppliers = result.get("cost_model", {}).get("suppliers", [])
     suppliers_pricing = []
     for sname in suppliers:
@@ -186,21 +209,20 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
         raise HTTPException(status_code=404, detail="No pricing result found.")
 
     result = json.loads(result_path.read_text())
-    matrix     = result.get("cost_model", {}).get("matrix", {})
-    suppliers  = result.get("cost_model", {}).get("suppliers", [])
+    matrix      = result.get("cost_model", {}).get("matrix", {})
+    suppliers   = result.get("cost_model", {}).get("suppliers", [])
     total_costs = result.get("total_costs", [])
     award_rec   = result.get("award_recommendation", {})
 
-    # ── CSV ────────────────────────────────────────────────────────────────────
     if format == "csv":
-        lines = ["Line Item,Category," + ",".join(suppliers) + ",Best Price,Best Supplier"]
-        bob   = result.get("best_of_best", {}).get("breakdown", [])
+        lines   = ["Line Item,Category," + ",".join(suppliers) + ",Best Price,Best Supplier"]
+        bob     = result.get("best_of_best", {}).get("breakdown", [])
         bob_map = {b["description"]: b for b in bob}
         for desc, smap in matrix.items():
-            cats    = [v["category"] for v in smap.values() if v]
-            cat     = cats[0] if cats else ""
-            prices  = [str(smap.get(s, {}).get("total", "") if smap.get(s) else "") for s in suppliers]
-            best    = bob_map.get(desc, {})
+            cats   = [v["category"] for v in smap.values() if v]
+            cat    = cats[0] if cats else ""
+            prices = [str(smap.get(s, {}).get("total", "") if smap.get(s) else "") for s in suppliers]
+            best   = bob_map.get(desc, {})
             lines.append(f'"{desc}","{cat}",' + ",".join(prices) + f',{best.get("best_total","")},"{best.get("best_supplier","")}"')
         content = "\n".join(lines).encode("utf-8")
         return StreamingResponse(
@@ -209,7 +231,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
             headers={"Content-Disposition": f"attachment; filename=pricing_{rfp_id}.csv"},
         )
 
-    # ── XLSX ───────────────────────────────────────────────────────────────────
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment
@@ -223,7 +244,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
     HEADER_FONT = Font(color="FFFFFF", bold=True)
     GREEN_FILL  = PatternFill("solid", fgColor="D4EDDA")
     CENTER      = Alignment(horizontal="center", wrap_text=True)
-    LEFT        = Alignment(horizontal="left",   wrap_text=True)
 
     def hdr(ws):
         for cell in ws[1]:
@@ -231,7 +251,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
             cell.fill = HEADER_FILL
             cell.alignment = CENTER
 
-    # Sheet 1: Summary
     ws1 = wb.create_sheet("Summary")
     ws1.append(["Rank", "Supplier", "Total Cost", "Line Items"])
     hdr(ws1)
@@ -241,7 +260,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
             for cell in ws1[ws1.max_row]: cell.fill = GREEN_FILL
     ws1.column_dimensions["B"].width = 30
 
-    # Sheet 2: Price Matrix
     ws2 = wb.create_sheet("Price Matrix")
     ws2.append(["Line Item", "Category"] + suppliers + ["Best Price", "Best Supplier"])
     hdr(ws2)
@@ -254,14 +272,12 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
         best   = bob_map.get(desc, {})
         row    = [desc, cat] + prices + [best.get("best_total", ""), best.get("best_supplier", "")]
         ws2.append(row)
-        # Highlight the best-priced cell in each row
         if best.get("best_supplier") in suppliers:
-            best_col = suppliers.index(best["best_supplier"]) + 3  # offset for desc + cat columns
+            best_col = suppliers.index(best["best_supplier"]) + 3
             ws2.cell(row=ws2.max_row, column=best_col).fill = GREEN_FILL
     ws2.column_dimensions["A"].width = 40
     ws2.column_dimensions["B"].width = 20
 
-    # Sheet 3: Market Basket 2
     if result.get("market_basket_2", {}).get("best"):
         ws3  = wb.create_sheet("Market Basket (2 Suppliers)")
         best = result["market_basket_2"]["best"]
@@ -273,7 +289,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
         ws3.column_dimensions["A"].width = 25
         ws3.column_dimensions["B"].width = 25
 
-    # Sheet 4: Market Basket 3
     if result.get("market_basket_3", {}).get("best"):
         ws4  = wb.create_sheet("Market Basket (3 Suppliers)")
         best = result["market_basket_3"]["best"]
@@ -285,7 +300,6 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
         ws4.column_dimensions["A"].width = 25
         ws4.column_dimensions["B"].width = 25
 
-    # Sheet 5: Award Recommendation
     ws5 = wb.create_sheet("Award Recommendation")
     ws5.append(["Recommended Strategy", award_rec.get("recommended_strategy", "")])
     ws5.append(["Recommended Total",    award_rec.get("recommended_total", "")])
