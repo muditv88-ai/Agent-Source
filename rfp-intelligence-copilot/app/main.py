@@ -6,6 +6,7 @@ from app.api.routes.rfp import router as rfp_router
 from app.api.routes.analysis import router as analysis_router
 from app.api.routes.scenarios import router as scenarios_router
 from app.api.routes.communications import router as communications_router
+from app.api.routes.chat import router as chat_router
 
 app = FastAPI(title="RFP Intelligence Copilot", version="1.0.0")
 
@@ -16,7 +17,7 @@ origins = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=False,  # must be False when using "*"
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -27,11 +28,12 @@ app.include_router(rfp_router, prefix="/rfp", tags=["RFP"])
 app.include_router(analysis_router, prefix="/analysis", tags=["Analysis"])
 app.include_router(scenarios_router, prefix="/scenarios", tags=["Scenarios"])
 app.include_router(communications_router, prefix="/communications", tags=["Communications"])
+app.include_router(chat_router, prefix="/chat", tags=["Chat"])
 
 
 @app.get("/")
 def root():
     return {
         "message": "RFP Intelligence Copilot API is running",
-        "endpoints": ["/health", "/rfp/upload", "/docs"]
+        "endpoints": ["/health", "/rfp/upload", "/chat/message", "/docs"]
     }
