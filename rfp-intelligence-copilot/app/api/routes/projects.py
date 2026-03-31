@@ -29,7 +29,22 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".pdf", ".docx"}
 _executor = ThreadPoolExecutor(max_workers=10)
 
 
-# ── Create project ───────────────────────────────────────────────────────────
+# ── MUST be registered BEFORE /{project_id} to avoid route shadowing ───────────
+
+@router.get("/parse-status/{job_id}")
+async def get_project_parse_status(job_id: str):
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+# ── Create project ──────────────────────────────────────────────────────────
 
 @router.post("", status_code=201)
 async def create_new_project(name: str = Form(...)):
@@ -40,7 +55,7 @@ async def create_new_project(name: str = Form(...)):
     return project
 
 
-# ── List projects ────────────────────────────────────────────────────────────
+# ── List projects ───────────────────────────────────────────────────────────
 
 @router.get("")
 async def list_all_projects():
@@ -48,14 +63,13 @@ async def list_all_projects():
     return {"projects": list_projects()}
 
 
-# ── Get single project ───────────────────────────────────────────────────────
+# ── Get single project ─────────────────────────────────────────────────────
 
 @router.get("/{project_id}")
 async def get_project_detail(project_id: str):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    # Attach supplier names
     suppliers_meta_path = get_suppliers_meta_path(project_id)
     suppliers = []
     if suppliers_meta_path.exists():
@@ -65,7 +79,7 @@ async def get_project_detail(project_id: str):
     return project
 
 
-# ── Delete project ───────────────────────────────────────────────────────────
+# ── Delete project ─────────────────────────────────────────────────────────
 
 @router.delete("/{project_id}")
 async def delete_project_endpoint(project_id: str):
@@ -75,7 +89,7 @@ async def delete_project_endpoint(project_id: str):
     return {"project_id": project_id, "deleted": True}
 
 
-# ── Upload RFP into project ──────────────────────────────────────────────────
+# ── Upload RFP into project ──────────────────────────────────────────────
 
 @router.post("/{project_id}/rfp")
 async def upload_project_rfp(project_id: str, file: UploadFile = File(...)):
@@ -89,7 +103,6 @@ async def upload_project_rfp(project_id: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Unsupported file type '{suffix}'")
 
     rfp_dir = PROJECTS_DIR / project_id / "rfp"
-    # Clear old RFP
     for old in rfp_dir.iterdir():
         old.unlink()
 
@@ -102,7 +115,7 @@ async def upload_project_rfp(project_id: str, file: UploadFile = File(...)):
     return {"project_id": project_id, "rfp_filename": file.filename, "status": "rfp_uploaded"}
 
 
-# ── Upload supplier into project ─────────────────────────────────────────────
+# ── Upload supplier into project ──────────────────────────────────────────
 
 @router.post("/{project_id}/supplier")
 async def upload_project_supplier(
@@ -110,7 +123,7 @@ async def upload_project_supplier(
     file: UploadFile = File(...),
     supplier_name: Optional[str] = Form(None),
 ):
-    """Upload a supplier response file. Can be called multiple times."""
+    """Upload a supplier response file."""
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -127,7 +140,6 @@ async def upload_project_supplier(
 
     resolved_name = (supplier_name or "").strip() or Path(file.filename).stem
 
-    # Persist supplier name mapping
     suppliers_meta_path = get_suppliers_meta_path(project_id)
     meta = json.loads(suppliers_meta_path.read_text()) if suppliers_meta_path.exists() else {}
     meta[str(dest)] = resolved_name
@@ -142,7 +154,7 @@ async def upload_project_supplier(
     }
 
 
-# ── Remove a supplier from project ──────────────────────────────────────────
+# ── Remove a supplier from project ───────────────────────────────────────
 
 @router.delete("/{project_id}/supplier/{filename}")
 async def remove_project_supplier(project_id: str, filename: str):
@@ -151,7 +163,6 @@ async def remove_project_supplier(project_id: str, filename: str):
     if not target.exists():
         raise HTTPException(status_code=404, detail="Supplier file not found")
     target.unlink()
-    # Remove from metadata
     suppliers_meta_path = get_suppliers_meta_path(project_id)
     if suppliers_meta_path.exists():
         meta = json.loads(suppliers_meta_path.read_text())
@@ -160,7 +171,7 @@ async def remove_project_supplier(project_id: str, filename: str):
     return {"deleted": filename}
 
 
-# ── Parse RFP from project files ─────────────────────────────────────────────
+# ── Parse RFP from project files ──────────────────────────────────────────
 
 def _do_parse_project(project_id: str) -> dict:
     rfp_path = get_rfp_path(project_id)
@@ -184,7 +195,6 @@ def _do_parse_project(project_id: str) -> dict:
         for q in raw_questions
     ]
 
-    # Persist to project metadata
     from app.services.project_store import get_questions_path
     q_path = get_questions_path(project_id)
     q_path.write_text(json.dumps([q.dict() for q in questions]))
@@ -222,15 +232,7 @@ async def parse_project_rfp(project_id: str, background_tasks: BackgroundTasks):
     return {"job_id": job_id, "status": JobStatus.PENDING}
 
 
-@router.get("/parse-status/{job_id}")
-async def get_project_parse_status(job_id: str):
-    job = job_store.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"job_id": job_id, "status": job["status"], "result": job.get("result"), "error": job.get("error")}
-
-
-# ── Run analysis from project files ──────────────────────────────────────────
+# ── Run analysis from project files ───────────────────────────────────────
 
 @router.post("/{project_id}/analyze")
 async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
@@ -244,6 +246,5 @@ async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
     if not get_supplier_paths(project_id):
         raise HTTPException(status_code=400, detail="No supplier files in project")
     job_id = job_store.create()
-    # Pass project_id as rfp_id so existing analysis logic resolves files from project store
     background_tasks.add_task(_run_analysis_job, project_id, job_id, project_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
