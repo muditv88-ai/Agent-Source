@@ -1,27 +1,26 @@
-import shutil
+import json
+import traceback
+import asyncio
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
+
 from app.services.project_store import (
-    create_project,
-    get_project,
-    list_projects,
-    delete_project,
-    get_rfp_path,
-    get_supplier_paths,
-    get_suppliers_meta_path,
-    update_project_status,
-    update_project_meta,
+    create_project, get_project, list_projects, delete_project,
+    get_rfp_path, get_supplier_paths,
+    get_questions_path, get_suppliers_meta_path,
+    update_project_status, update_project_meta,
+    save_rfp_file, save_supplier_file, save_metadata, load_metadata,
+    ensure_rfp_local, ensure_suppliers_local,
+    delete_supplier_file, is_gcs_enabled,
     PROJECTS_DIR,
 )
 from app.services.job_store import job_store, JobStatus
 from app.services.document_parser import parse_document
 from app.services.rfp_extractor import extract_rfp_questions
 from app.models.schemas import RFPQuestion
-import asyncio
-import json
-import traceback
-from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
 
@@ -29,57 +28,42 @@ ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv", ".pdf", ".docx"}
 _executor = ThreadPoolExecutor(max_workers=10)
 
 
-# ── MUST be registered BEFORE /{project_id} to avoid route shadowing ───────────
+# ── Must be before /{project_id} to avoid route shadowing ───────────────────
 
 @router.get("/parse-status/{job_id}")
 async def get_project_parse_status(job_id: str):
     job = job_store.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return {
-        "job_id": job_id,
-        "status": job["status"],
-        "result": job.get("result"),
-        "error": job.get("error"),
-    }
+    return {"job_id": job_id, "status": job["status"],
+            "result": job.get("result"), "error": job.get("error")}
 
 
-# ── Create project ──────────────────────────────────────────────────────────
+# ── CRUD ──────────────────────────────────────────────────────────────────────────
 
 @router.post("", status_code=201)
 async def create_new_project(name: str = Form(...)):
-    """Create a new project container. Returns project_id."""
     if not name or not name.strip():
         raise HTTPException(status_code=400, detail="Project name is required")
-    project = create_project(name.strip())
-    return project
+    return create_project(name.strip())
 
-
-# ── List projects ───────────────────────────────────────────────────────────
 
 @router.get("")
 async def list_all_projects():
-    """Return all projects ordered by most recently modified."""
     return {"projects": list_projects()}
 
-
-# ── Get single project ─────────────────────────────────────────────────────
 
 @router.get("/{project_id}")
 async def get_project_detail(project_id: str):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    suppliers_meta_path = get_suppliers_meta_path(project_id)
-    suppliers = []
-    if suppliers_meta_path.exists():
-        raw = json.loads(suppliers_meta_path.read_text())
-        suppliers = [{"path": k, "name": v} for k, v in raw.items()]
-    project["suppliers"] = suppliers
+    # Load supplier names from metadata
+    meta = load_metadata(project_id, "suppliers.json") or {}
+    project["suppliers"] = [{"path": k, "name": v} for k, v in meta.items()]
+    project["storage_backend"] = "gcs" if is_gcs_enabled() else "local"
     return project
 
-
-# ── Delete project ─────────────────────────────────────────────────────────
 
 @router.delete("/{project_id}")
 async def delete_project_endpoint(project_id: str):
@@ -89,33 +73,24 @@ async def delete_project_endpoint(project_id: str):
     return {"project_id": project_id, "deleted": True}
 
 
-# ── Upload RFP into project ──────────────────────────────────────────────
+# ── Upload RFP ──────────────────────────────────────────────────────────────────
 
 @router.post("/{project_id}/rfp")
 async def upload_project_rfp(project_id: str, file: UploadFile = File(...)):
-    """Upload the RFP document for a project (replaces existing if any)."""
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type '{suffix}'")
 
-    rfp_dir = PROJECTS_DIR / project_id / "rfp"
-    for old in rfp_dir.iterdir():
-        old.unlink()
-
-    dest = rfp_dir / file.filename
-    with dest.open("wb") as buf:
-        import shutil as _sh
-        _sh.copyfileobj(file.file, buf)
-
+    data = await file.read()
+    save_rfp_file(project_id, file.filename, data)
     update_project_meta(project_id, rfp_filename=file.filename, status="rfp_uploaded")
     return {"project_id": project_id, "rfp_filename": file.filename, "status": "rfp_uploaded"}
 
 
-# ── Upload supplier into project ──────────────────────────────────────────
+# ── Upload supplier ───────────────────────────────────────────────────────────
 
 @router.post("/{project_id}/supplier")
 async def upload_project_supplier(
@@ -123,27 +98,21 @@ async def upload_project_supplier(
     file: UploadFile = File(...),
     supplier_name: Optional[str] = Form(None),
 ):
-    """Upload a supplier response file."""
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-
     suffix = Path(file.filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type '{suffix}'")
 
-    supplier_dir = PROJECTS_DIR / project_id / "suppliers"
-    dest = supplier_dir / file.filename
-    with dest.open("wb") as buf:
-        import shutil as _sh
-        _sh.copyfileobj(file.file, buf)
-
+    data = await file.read()
+    local_path = save_supplier_file(project_id, file.filename, data)
     resolved_name = (supplier_name or "").strip() or Path(file.filename).stem
 
-    suppliers_meta_path = get_suppliers_meta_path(project_id)
-    meta = json.loads(suppliers_meta_path.read_text()) if suppliers_meta_path.exists() else {}
-    meta[str(dest)] = resolved_name
-    suppliers_meta_path.write_text(json.dumps(meta, indent=2))
+    # Update suppliers metadata
+    meta = load_metadata(project_id, "suppliers.json") or {}
+    meta[str(local_path)] = resolved_name
+    save_metadata(project_id, "suppliers.json", meta)
 
     update_project_meta(project_id, status="suppliers_uploaded")
     return {
@@ -154,34 +123,34 @@ async def upload_project_supplier(
     }
 
 
-# ── Remove a supplier from project ───────────────────────────────────────
+# ── Remove supplier ───────────────────────────────────────────────────────────
 
 @router.delete("/{project_id}/supplier/{filename}")
 async def remove_project_supplier(project_id: str, filename: str):
-    supplier_dir = PROJECTS_DIR / project_id / "suppliers"
-    target = supplier_dir / filename
-    if not target.exists():
+    deleted = delete_supplier_file(project_id, filename)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Supplier file not found")
-    target.unlink()
-    suppliers_meta_path = get_suppliers_meta_path(project_id)
-    if suppliers_meta_path.exists():
-        meta = json.loads(suppliers_meta_path.read_text())
-        meta.pop(str(target), None)
-        suppliers_meta_path.write_text(json.dumps(meta, indent=2))
+    # Clean from metadata
+    meta = load_metadata(project_id, "suppliers.json") or {}
+    keys_to_remove = [k for k in meta if Path(k).name == filename]
+    for k in keys_to_remove:
+        del meta[k]
+    save_metadata(project_id, "suppliers.json", meta)
     return {"deleted": filename}
 
 
-# ── Parse RFP from project files ──────────────────────────────────────────
+# ── Parse RFP ─────────────────────────────────────────────────────────────────────
 
 def _do_parse_project(project_id: str) -> dict:
-    rfp_path = get_rfp_path(project_id)
+    # Ensure file is local (downloads from GCS if needed)
+    rfp_path = ensure_rfp_local(project_id)
     if not rfp_path:
         raise FileNotFoundError("No RFP file found in project")
 
     parsed_doc = parse_document(str(rfp_path))
-    full_text = parsed_doc.get("full_text", "")
-    extracted = extract_rfp_questions(full_text)
-    raw_questions = extracted.get("questions", [])
+    full_text  = parsed_doc.get("full_text", "")
+    extracted  = extract_rfp_questions(full_text)
+    raw_qs     = extracted.get("questions", [])
 
     questions = [
         RFPQuestion(
@@ -192,12 +161,11 @@ def _do_parse_project(project_id: str) -> dict:
             weight=float(q.get("weight", 10)),
             scoring_guidance=q.get("scoring_guidance"),
         )
-        for q in raw_questions
+        for q in raw_qs
     ]
 
-    from app.services.project_store import get_questions_path
-    q_path = get_questions_path(project_id)
-    q_path.write_text(json.dumps([q.dict() for q in questions]))
+    # Save questions to both local + GCS
+    save_metadata(project_id, "questions.json", [q.dict() for q in questions])
     update_project_meta(project_id, status="parsed")
 
     return {
@@ -212,7 +180,7 @@ def _do_parse_project(project_id: str) -> dict:
 async def _run_parse_project(project_id: str, job_id: str):
     job_store.set_running(job_id)
     try:
-        loop = asyncio.get_running_loop()
+        loop   = asyncio.get_running_loop()
         result = await loop.run_in_executor(_executor, _do_parse_project, project_id)
         job_store.set_completed(job_id, result)
     except Exception as e:
@@ -221,30 +189,22 @@ async def _run_parse_project(project_id: str, job_id: str):
 
 @router.post("/{project_id}/parse")
 async def parse_project_rfp(project_id: str, background_tasks: BackgroundTasks):
-    """Re-parse the stored RFP. No file upload needed."""
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if not get_rfp_path(project_id):
-        raise HTTPException(status_code=400, detail="No RFP file uploaded for this project yet")
     job_id = job_store.create()
     background_tasks.add_task(_run_parse_project, project_id, job_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
 
 
-# ── Run analysis from project files ───────────────────────────────────────
+# ── Analyze project ───────────────────────────────────────────────────────────
 
 @router.post("/{project_id}/analyze")
 async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
-    """Run analysis using stored project files. No re-upload needed."""
     from app.api.routes.analysis import _run_analysis_job
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    if not get_rfp_path(project_id):
-        raise HTTPException(status_code=400, detail="No RFP file in project")
-    if not get_supplier_paths(project_id):
-        raise HTTPException(status_code=400, detail="No supplier files in project")
     job_id = job_store.create()
     background_tasks.add_task(_run_analysis_job, project_id, job_id, project_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
