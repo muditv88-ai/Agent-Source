@@ -1,13 +1,25 @@
 """
-pricing_parser.py v2
+pricing_parser.py v3
 
 Phase 1 (AI): Parse the pricing/commercial sheet, understand its structure,
               identify buyer-defined fields vs supplier-filled fields.
 Phase 2 (Python): Return a structured PricingSheet object ready for
                   pure-Python comparison and scenario calculation.
 
-Supports: Excel (.xlsx/.xls), CSV, PDF/text with tables.
-Falls back to LLM extraction when structural parsing yields no prices.
+Supports:
+  - Excel (.xlsx/.xls), CSV, PDF/text with tables
+  - Simple unit-price model  (Unit Price × Qty = Total)
+  - Cost-breakdown model     (API Cost + RM + Pkg + Mfg + Overhead + Margin = Unit Total)
+  - Rate-card, flat-rate, category-based structures
+  - LLM fallback when structural parse yields no prices (up to 12k chars)
+
+v3 changes:
+  - Cost-breakdown column detection (API Cost, RM Cost, Pkg Cost, Mfg Cost, Overhead, Margin)
+  - Expanded _find() synonym list to match real-world supplier column names
+  - Section-header skip logic (avoids treating SECTION A/B/C rows as data)
+  - rfp_full_text now injected into LLM prompts for column context
+  - LLM fallback text limit raised from 8k → 12k chars
+  - Graceful handling of pharmaceutical SKU# / Drug Name / Strength combos
 """
 import os
 import re
@@ -20,14 +32,32 @@ _client = OpenAI(
     base_url="https://integrate.api.nvidia.com/v1",
     api_key=os.environ.get("NVIDIA_API_KEY"),
 )
-MODEL = "meta/llama-3.3-70b-instruct"   # faster model for parsing
+MODEL = "meta/llama-3.3-70b-instruct"
 
 # ── Structure labels ──────────────────────────────────────────────────────────
-STRUCTURE_LINE_ITEM = "line_item"
-STRUCTURE_FLAT_RATE = "flat_rate"
-STRUCTURE_CATEGORY  = "category_based"
-STRUCTURE_RATE_CARD = "rate_card"
-STRUCTURE_MIXED     = "mixed"
+STRUCTURE_LINE_ITEM   = "line_item"
+STRUCTURE_FLAT_RATE   = "flat_rate"
+STRUCTURE_CATEGORY    = "category_based"
+STRUCTURE_RATE_CARD   = "rate_card"
+STRUCTURE_MIXED       = "mixed"
+STRUCTURE_COST_BREAKDOWN = "cost_breakdown"   # NEW — pharma / manufacturing model
+
+# ── Section-header patterns to skip ──────────────────────────────────────────
+_SECTION_SKIP_RE = re.compile(
+    r"^(SECTION [A-Z]|PART [A-Z0-9]|APPENDIX|EXHIBIT|ATTACHMENT|SCHEDULE)\b",
+    re.IGNORECASE,
+)
+
+# ── Cost-breakdown column groups (v3) ─────────────────────────────────────────
+# Each tuple: (output_key, list_of_header_substrings_to_match)
+_COST_BREAKDOWN_COLS = [
+    ("api_cost",   ["api cost", "api", "active ingredient", "raw material cost", "rm cost", "material cost"]),
+    ("rm_cost",    ["rm cost", "raw mat", "excipient", "other material"]),
+    ("pkg_cost",   ["pkg cost", "pack cost", "packaging", "container", "label"]),
+    ("mfg_cost",   ["mfg cost", "manufacturing cost", "conversion", "production cost", "process cost"]),
+    ("overhead",   ["overhead", "indirect", "burden", "opex"]),
+    ("margin",     ["margin", "profit", "markup", "mark-up", "gp"]),
+]
 
 # ── RFP structure understanding prompt ───────────────────────────────────────
 _RFP_STRUCTURE_PROMPT = """
@@ -37,18 +67,22 @@ Identify:
 1. BUYER-DEFINED fields: values pre-filled by the buyer in the RFP template
    (e.g. SKU codes, item descriptions, quantities, specifications, target prices)
 2. SUPPLIER-FILLED fields: columns/cells the supplier was asked to complete
-   (e.g. unit price, total cost, discount %, delivery lead time, payment terms)
-3. The pricing structure type: line_item | flat_rate | category_based | rate_card | mixed
+   (e.g. unit price, total cost, discount %, delivery lead time, payment terms,
+    API cost, RM cost, packaging cost, manufacturing cost, overhead, margin)
+3. The pricing structure type:
+   line_item | flat_rate | category_based | rate_card | mixed | cost_breakdown
+   Use cost_breakdown when the supplier provides a cost build-up
+   (e.g. API Cost + RM Cost + Packaging + Manufacturing + Overhead + Margin = Unit Total)
 4. The currency (if detectable)
-5. Whether there is a Grand Total / Total Cost cell
+5. Whether there is a Grand Total / Total Cost / Unit Total cell
 
 Return ONLY this JSON:
 {
-  "structure_type": "line_item",
+  "structure_type": "cost_breakdown",
   "currency": "USD",
-  "buyer_fields": ["SKU", "Description", "Quantity"],
-  "supplier_fields": ["Unit Price", "Total Price", "Lead Time"],
-  "has_grand_total": true,
+  "buyer_fields": ["SKU#", "Drug Name", "Strength", "Dosage Form", "Annual Vol"],
+  "supplier_fields": ["API Cost", "RM Cost", "Pkg Cost", "Mfg Cost", "Overhead", "Margin", "Unit Total"],
+  "has_grand_total": false,
   "notes": "any important structural observations"
 }
 """
@@ -58,24 +92,30 @@ _LLM_PRICING_PROMPT = """
 You are a procurement data extraction assistant.
 Extract ALL pricing line items from the supplier document text below.
 
+IMPORTANT: This document may use a COST BREAKDOWN model where the unit price
+is built up from components: API Cost + RM Cost + Pkg Cost + Mfg Cost + Overhead + Margin = Unit Total.
+In that case, set unit_price = Unit Total (the final all-in price per unit).
+Also capture individual cost components in the "notes" field if present.
+
 Return ONLY a JSON array. Each item must have:
 - "sku": string (SKU/part number if present, else "")
-- "description": string (item/service name — required)
-- "quantity": number (default 1)
-- "unit_price": number (supplier's price per unit, 0 if blank)
-- "total": number (quantity * unit_price, or stated total)
-- "category": string (infer: Software / Hardware / Services / Support / Logistics)
-- "unit": string (each / hour / day / month / year / kg — if stated)
-- "is_buyer_defined": true if this row was pre-filled by RFP template, false if supplier-entered
-- "notes": string (discounts, conditions, caveats)
+- "description": string (item/service name — required; for pharma: "Drug Name Strength Dosage Form")
+- "quantity": number (annual volume if stated, else 1)
+- "unit_price": number (final unit total / all-in price per unit, 0 if blank)
+- "total": number (quantity × unit_price, or stated total)
+- "category": string (infer from drug class or section: Cardiovascular / Antibiotics / Analgesics / Respiratory / etc.)
+- "unit": string (tablet / capsule / vial / inhaler / syringe — if stated, else "unit")
+- "is_buyer_defined": true if SKU/description was pre-filled by buyer template
+- "notes": string (cost breakdown details, discounts, pack type, conditions)
 
 Rules:
-- Include ALL items with a price. Skip items where both unit_price and total are 0.
-- Strip currency symbols and commas from numbers.
+- Include ALL items with a price. Skip items where unit_price AND total are both 0.
+- Strip currency symbols ($, £, €, ₹) and commas from numbers.
 - If only total given and qty>1: unit_price = total / qty.
+- For cost-breakdown rows: unit_price = the "Unit Total" or rightmost total column.
 - Return [] if truly no pricing found.
 
-Document text (≤8000 chars):
+Document text (up to 12000 chars):
 """
 
 
@@ -112,9 +152,12 @@ def _parse_json(raw: str) -> Any:
     return json.loads(raw)
 
 
-def _llm_understand_structure(text: str) -> dict:
+def _llm_understand_structure(text: str, rfp_text: str = "") -> dict:
     """Ask LLM to identify buyer vs supplier fields."""
-    prompt = _RFP_STRUCTURE_PROMPT + "\n\nDocument text (≤3000 chars):\n" + text[:3000]
+    context = ""
+    if rfp_text:
+        context = "\n\nRFP template column definitions (buyer-defined):\n" + rfp_text[:1500]
+    prompt = _RFP_STRUCTURE_PROMPT + context + "\n\nSupplier document text (up to 3000 chars):\n" + text[:3000]
     try:
         raw = _call_llm(prompt, max_tokens=512)
         return _parse_json(raw)
@@ -129,11 +172,14 @@ def _llm_understand_structure(text: str) -> dict:
         }
 
 
-def _llm_extract_line_items(text: str, supplier_name: str) -> list:
+def _llm_extract_line_items(text: str, supplier_name: str, rfp_text: str = "") -> list:
     """LLM fallback: extract structured line items from unstructured text."""
-    prompt = _LLM_PRICING_PROMPT + text[:8000]
+    context = ""
+    if rfp_text:
+        context = "\nRFP column context:\n" + rfp_text[:1000] + "\n"
+    prompt = _LLM_PRICING_PROMPT + context + text[:12000]
     try:
-        raw   = _call_llm(prompt, max_tokens=2048)
+        raw   = _call_llm(prompt, max_tokens=4096)
         items = _parse_json(raw)
         if not isinstance(items, list):
             items = items.get("line_items") or items.get("items") or []
@@ -176,7 +222,7 @@ def _sanitise_items(items: list) -> list:
 def _clean_number(val: Any) -> float | None:
     if val is None:
         return None
-    s = re.sub(r"[,$£€₹%]", "", str(val).strip()).replace(",", "")
+    s = re.sub(r"[$£€₹%,]", "", str(val).strip())
     try:
         return float(s)
     except ValueError:
@@ -187,17 +233,23 @@ def _clean_number(val: Any) -> float | None:
 
 def _parse_excel_bytes(content: bytes) -> dict:
     import openpyxl, io
-    wb   = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    wb     = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     sheets = []
     for sheet_name in wb.sheetnames:
         ws       = wb[sheet_name]
         rows_raw = list(ws.iter_rows(values_only=True))
         if not rows_raw:
             continue
-        # Find header row: first row with ≥2 non-empty cells
+        # Find header row: first row with ≥2 non-empty cells and at least one
+        # cell that looks like a column name (non-numeric)
         hdr_idx = 0
         for i, row in enumerate(rows_raw):
-            if len([c for c in row if c is not None and str(c).strip()]) >= 2:
+            non_empty = [c for c in row if c is not None and str(c).strip()]
+            has_label = any(
+                not re.match(r'^[\d\$\€\£\₹\.\,\%\-]+$', str(c).strip())
+                for c in non_empty
+            )
+            if len(non_empty) >= 2 and has_label:
                 hdr_idx = i
                 break
         headers   = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(rows_raw[hdr_idx])]
@@ -247,14 +299,25 @@ def _extract_tables_from_text(text: str) -> dict:
     return {"source": "text", "sheets": sheets}
 
 
-# ── Sheet normaliser (structural parsing) ─────────────────────────────────────
+# ── Structure detector ────────────────────────────────────────────────────────
 
 def _detect_structure(headers: list) -> str:
     h = " ".join(headers).lower()
-    has_sku        = any(k in h for k in ["sku", "item", "product", "part", "line", "description"])
-    has_qty        = any(k in h for k in ["qty", "quantity", "units", "volume"])
-    has_unit_price = any(k in h for k in ["unit price", "unit cost", "rate", "price per", "cost per"])
-    has_category   = any(k in h for k in ["category", "section", "group", "type"])
+    # Cost breakdown: has multiple cost component columns
+    breakdown_hits = sum(
+        1 for _, synonyms in _COST_BREAKDOWN_COLS
+        if any(s in h for s in synonyms)
+    )
+    if breakdown_hits >= 3:
+        return STRUCTURE_COST_BREAKDOWN
+    has_sku        = any(k in h for k in ["sku", "item", "product", "part", "line", "description", "drug", "material"])
+    has_qty        = any(k in h for k in ["qty", "quantity", "units", "volume", "annual vol", "packs"])
+    has_unit_price = any(k in h for k in [
+        "unit price", "unit cost", "unit total", "rate", "price per", "cost per",
+        "quoted price", "offered price", "vendor price", "supplier price",
+        "net price", "sell price", "list price", "total price", "amount",
+    ])
+    has_category   = any(k in h for k in ["category", "section", "group", "type", "drug class", "therapeutic"])
     has_role       = any(k in h for k in ["role", "resource", "level", "grade", "tier", "day rate", "hourly"])
     has_flat       = any(k in h for k in ["one-time", "setup", "annual", "monthly", "recurring", "subscription", "licence", "license"])
     if has_role and has_unit_price:     return STRUCTURE_RATE_CARD
@@ -264,43 +327,108 @@ def _detect_structure(headers: list) -> str:
     return STRUCTURE_MIXED
 
 
+# ── Sheet normaliser ──────────────────────────────────────────────────────────
+
 def _normalise_sheet(sheet: dict, supplier_name: str, buyer_fields: list, supplier_fields: list) -> dict:
     headers  = sheet.get("headers", [])
     rows     = sheet.get("rows", [])
     h_lower  = [h.lower() for h in headers]
+    structure = _detect_structure(headers)
 
-    # Identify buyer_fields vs supplier_fields from LLM analysis
     buyer_cols    = [h for h in headers if any(bf.lower() in h.lower() for bf in buyer_fields)]
     supplier_cols = [h for h in headers if any(sf.lower() in h.lower() for sf in supplier_fields)]
 
     def _find(*candidates):
+        """Return header name for first candidate substring found."""
         for c in candidates:
             for i, h in enumerate(h_lower):
                 if c in h:
                     return headers[i]
         return None
 
-    sku_col    = _find("sku", "part", "code", "item no", "item#")
-    desc_col   = _find("description", "item", "product", "service", "name", "role", "resource", "category", "section")
-    qty_col    = _find("qty", "quantity", "units", "volume", "hours", "days")
-    price_col  = _find("unit price", "unit cost", "rate", "price", "cost", "fee", "amount")
-    total_col  = _find("total", "extended", "subtotal", "line total")
-    cat_col    = _find("category", "group", "section", "type")
-    unit_col   = _find("unit", "uom", "measure")
-    notes_col  = _find("notes", "comments", "remarks", "conditions")
+    # ── Column mapping — expanded synonyms for real-world supplier docs ──────
+    sku_col = _find(
+        "sku", "sku#", "part", "code", "item no", "item#", "item code",
+        "product code", "article", "ref", "material no",
+    )
+    desc_col = _find(
+        "description", "item", "product", "service", "name", "drug name",
+        "drug", "medicine", "material", "role", "resource", "category", "section",
+    )
+    strength_col = _find("strength", "dose", "concentration", "potency")
+    form_col     = _find("dosage form", "form", "formulation", "type")
+    qty_col = _find(
+        "annual vol", "qty", "quantity", "units", "volume", "hours", "days",
+        "packs", "annual quantity", "annual units",
+    )
+    # Price column: try specific then generic, prefer "unit total" for cost-breakdown
+    price_col = _find(
+        "unit total", "total unit", "all-in", "all in price",
+        "unit price", "unit cost", "rate", "quoted price", "offered price",
+        "vendor price", "supplier price", "net price", "sell price", "list price",
+        "price", "cost", "fee", "amount",
+    )
+    total_col  = _find("total cost", "total", "extended", "subtotal", "line total", "grand total")
+    cat_col    = _find("drug class", "therapeutic", "category", "group", "section", "type")
+    unit_col   = _find("dosage form", "unit", "uom", "measure", "form")
+    notes_col  = _find("comments", "notes", "remarks", "conditions", "caveats")
+    pack_col   = _find("pack type", "pack", "packaging", "container")
+
+    # ── Cost-breakdown component columns ─────────────────────────────────────
+    breakdown_col_map = {}
+    if structure == STRUCTURE_COST_BREAKDOWN:
+        for key, synonyms in _COST_BREAKDOWN_COLS:
+            col = _find(*synonyms)
+            if col:
+                breakdown_col_map[key] = col
 
     line_items = []
     for row in rows:
-        sku        = str(row.get(sku_col, "")).strip()   if sku_col   else ""
-        desc       = str(row.get(desc_col, "")).strip()  if desc_col  else ""
+        # Skip section-header rows
+        first_val = str(list(row.values())[0] or "").strip()
+        if _SECTION_SKIP_RE.match(first_val):
+            continue
+
+        sku  = str(row.get(sku_col, "")).strip()  if sku_col  else ""
+        desc = str(row.get(desc_col, "")).strip() if desc_col else ""
+
+        # For pharma docs: build description from Drug Name + Strength + Form
+        if strength_col or form_col:
+            parts = [desc]
+            if strength_col:
+                s = str(row.get(strength_col, "")).strip()
+                if s and s not in desc:
+                    parts.append(s)
+            if form_col:
+                f = str(row.get(form_col, "")).strip()
+                if f and f not in desc:
+                    parts.append(f)
+            desc = " ".join(p for p in parts if p).strip()
+
         qty        = _clean_number(row.get(qty_col))    if qty_col   else 1.0
         unit_price = _clean_number(row.get(price_col)) if price_col else None
         total      = _clean_number(row.get(total_col)) if total_col else None
         category   = str(row.get(cat_col, "")).strip()  if cat_col   else sheet.get("sheet_name", "")
         unit       = str(row.get(unit_col, "each")).strip() if unit_col else "each"
-        notes      = str(row.get(notes_col, "")).strip() if notes_col else ""
+        notes_raw  = str(row.get(notes_col, "")).strip() if notes_col else ""
+        pack       = str(row.get(pack_col, "")).strip()  if pack_col  else ""
 
-        # Determine if this row is buyer-defined or supplier-filled
+        # Build notes with cost breakdown detail
+        notes_parts = []
+        if pack:
+            notes_parts.append(f"Pack: {pack}")
+        if breakdown_col_map:
+            bd_parts = []
+            for key, col in breakdown_col_map.items():
+                v = _clean_number(row.get(col))
+                if v is not None and v > 0:
+                    bd_parts.append(f"{key}={v:.4f}")
+            if bd_parts:
+                notes_parts.append("Cost breakdown: " + ", ".join(bd_parts))
+        if notes_raw:
+            notes_parts.append(notes_raw)
+        notes = " | ".join(notes_parts)
+
         is_buyer_defined = bool(desc_col and desc_col in buyer_cols)
 
         if not desc and unit_price is None and total is None:
@@ -310,21 +438,25 @@ def _normalise_sheet(sheet: dict, supplier_name: str, buyer_fields: list, suppli
         if unit_price is None and total is not None and qty:
             unit_price = round(total / (qty or 1), 2)
 
+        # Skip rows with no numeric pricing at all
+        if (unit_price is None or unit_price == 0) and (total is None or total == 0):
+            continue
+
         line_items.append({
-            "sku":            sku,
-            "description":    desc,
-            "quantity":       qty or 1.0,
-            "unit_price":     unit_price or 0.0,
-            "total":          total or 0.0,
-            "category":       category,
-            "unit":           unit,
+            "sku":             sku,
+            "description":     desc,
+            "quantity":        qty or 1.0,
+            "unit_price":      unit_price or 0.0,
+            "total":           total or 0.0,
+            "category":        category,
+            "unit":            unit,
             "is_buyer_defined": is_buyer_defined,
-            "notes":          notes,
+            "notes":           notes,
         })
 
     return {
         "sheet_name":     sheet.get("sheet_name", "Pricing"),
-        "structure_type": _detect_structure(headers),
+        "structure_type": structure,
         "supplier_name":  supplier_name,
         "headers":        headers,
         "buyer_cols":     buyer_cols,
@@ -370,13 +502,12 @@ def extract_pricing_from_document(
     # --- Phase 1: LLM structure understanding ---
     sample_text = full_text[:3000] if full_text else ""
     if not sample_text and raw.get("sheets"):
-        # Build text sample from first sheet headers + first 10 rows
         first = raw["sheets"][0]
         sample_text = " | ".join(first.get("headers", [])) + "\n"
         for row in list(first.get("rows", []))[:10]:
-            sample_text += " | ".join(str(v) for v in row.values()) + "\n"
+            sample_text += " | ".join(str(v) for v in row.values() if v is not None) + "\n"
 
-    structure_info = _llm_understand_structure(sample_text) if sample_text else {
+    structure_info = _llm_understand_structure(sample_text, rfp_full_text) if sample_text else {
         "structure_type": "line_item", "currency": "",
         "buyer_fields": [], "supplier_fields": [], "has_grand_total": False, "notes": ""
     }
@@ -403,7 +534,7 @@ def extract_pricing_from_document(
 
     # --- LLM fallback if structural parse yielded nothing ---
     if total_priced == 0 and full_text:
-        llm_items = _llm_extract_line_items(full_text, supplier_name)
+        llm_items = _llm_extract_line_items(full_text, supplier_name, rfp_full_text)
         if llm_items:
             all_items    = llm_items
             total_priced = sum(i["total"] for i in llm_items)
@@ -428,7 +559,7 @@ def extract_pricing_from_document(
     return {
         "supplier_name":   supplier_name,
         "structure_type":  structure_types[0] if len(structure_types) == 1 else "mixed",
-        "structure_info":  structure_info,        # buyer vs supplier field map
+        "structure_info":  structure_info,
         "sheets":          normalised_sheets,
         "all_line_items":  all_items,
         "total_cost":      round(total_priced, 2),
