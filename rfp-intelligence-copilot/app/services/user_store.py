@@ -1,13 +1,12 @@
 """
-Simple file-based user store.
-Users are stored in users.json as:
-  {"username": {"password_hash": "...", "role": "admin|user"}}
+File-based user store. Users stored in users.json.
 
-To add a user from CLI:
-  python -c "from app.services.user_store import create_user; create_user('alice', 'secret123', 'user')"
+CLI usage:
+  python -c "from app.services.user_store import create_user; create_user('alice', 'pass123', 'user')"
 """
 import json
 import os
+import re
 from pathlib import Path
 from passlib.context import CryptContext
 
@@ -25,16 +24,55 @@ def _save(data: dict):
     USERS_FILE.write_text(json.dumps(data, indent=2))
 
 
-def create_user(username: str, password: str, role: str = "user") -> dict:
+def _slug(name: str) -> str:
+    """Turn an email or display name into a safe username."""
+    base = name.split("@")[0]
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", base)[:32]
+
+
+def create_user(
+    username: str,
+    password: str = "",
+    role: str = "user",
+    email: str = "",
+    google_email: str = "",
+) -> dict:
     data = _load()
     if username in data:
-        raise ValueError(f"User '{username}' already exists")
-    data[username] = {
-        "password_hash": pwd_context.hash(password),
-        "role": role,
-    }
+        raise ValueError(f"Username '{username}' is already taken")
+    entry: dict = {"role": role}
+    if password:
+        entry["password_hash"] = pwd_context.hash(password)
+    if email:
+        entry["email"] = email
+    if google_email:
+        entry["google_email"] = google_email
+    data[username] = entry
     _save(data)
     return {"username": username, "role": role}
+
+
+def get_or_create_google_user(google_email: str, display_name: str) -> dict:
+    """Find existing user by google_email or create one on first login."""
+    data = _load()
+    # Look for existing Google user
+    for username, entry in data.items():
+        if entry.get("google_email") == google_email:
+            return {"username": username, "role": entry["role"]}
+    # First-time Google login — auto-create account
+    base = _slug(display_name or google_email)
+    username = base
+    counter = 1
+    while username in data:
+        username = f"{base}{counter}"
+        counter += 1
+    data[username] = {
+        "role": "user",
+        "google_email": google_email,
+        "email": google_email,
+    }
+    _save(data)
+    return {"username": username, "role": "user"}
 
 
 def update_password(username: str, new_password: str):
@@ -55,16 +93,21 @@ def delete_user(username: str):
 
 def list_users() -> list:
     data = _load()
-    return [{"username": u, "role": v["role"]} for u, v in data.items()]
+    return [
+        {"username": u, "role": v["role"], "email": v.get("email", "")}
+        for u, v in data.items()
+    ]
 
 
 def authenticate(username: str, password: str) -> dict | None:
-    """Returns user dict if credentials valid, else None."""
     data = _load()
     user = data.get(username)
     if not user:
         return None
-    if not pwd_context.verify(password, user["password_hash"]):
+    pw_hash = user.get("password_hash")
+    if not pw_hash:
+        return None  # Google-only account, no password set
+    if not pwd_context.verify(password, pw_hash):
         return None
     return {"username": username, "role": user["role"]}
 
