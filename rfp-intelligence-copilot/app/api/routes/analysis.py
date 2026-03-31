@@ -3,14 +3,16 @@ analysis.py — analysis routes with:
   - parallel per-supplier scoring (eliminates timeout)
   - dual-LLM cross-check (primary + checker model)
   - tech/commercial split scores
-  - price comparison table across suppliers
+  - price comparison table across suppliers (extracted from FULL document text)
   - GCS-aware file resolution
+  - supplier company name resolved from document header (not filename)
 """
 import asyncio
 import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Dict
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
@@ -22,18 +24,19 @@ from app.services.aggregator import aggregate_scores, compute_split_scores
 from app.services.ai_scorer import (
     score_questions_parallel,
     extract_prices_from_text,
+    extract_supplier_name_from_text,
     generate_supplier_summary,
 )
 from app.services.document_parser import parse_document
 
 router   = APIRouter()
-_executor = ThreadPoolExecutor(max_workers=4)   # one slot per supplier (parallel suppliers)
+_executor = ThreadPoolExecutor(max_workers=4)
 
 UPLOAD_DIR = Path("uploads")
 META_DIR   = Path("metadata")
 
 
-# ── File resolution ─────────────────────────────────────────────────────────────────
+# ── File resolution ────────────────────────────────────────────────────────────
 
 def _resolve_rfp_files(rfp_id: str, project_id: str = None):
     if project_id:
@@ -56,7 +59,7 @@ def _resolve_rfp_files(rfp_id: str, project_id: str = None):
         return rfp_path, supplier_paths, questions_path, supplier_names
 
 
-# ── Per-supplier analysis (runs in thread) ───────────────────────────────────────────
+# ── Per-supplier analysis (runs in thread) ──────────────────────────────────────────
 
 def _analyse_one_supplier(
     sup: dict,
@@ -69,11 +72,11 @@ def _analyse_one_supplier(
 ) -> dict:
     supplier_name = sup["supplier_name"]
     answers       = sup.get("answers", {})
+    full_text     = sup.get("full_text", "")   # ← full document text carried through
 
-    # Score all questions in parallel threads (within this supplier)
     question_scores = score_questions_parallel(
         questions=questions,
-        supplier_answer="",          # unused; answers passed per-question inside
+        supplier_answer="",
         answers=answers,
         cross_answers=cross_answers,
         supplier_name=supplier_name,
@@ -83,16 +86,13 @@ def _analyse_one_supplier(
 
     category_results = aggregate_scores(questions, question_scores, answers, supplier_name)
     split            = compute_split_scores(category_results, tech_weight, commercial_weight)
+    flagged_count    = sum(1 for s in question_scores.values() if s.get("flagged"))
 
-    flagged_count = sum(1 for s in question_scores.values() if s.get("flagged"))
-
-    # Price extraction from commercial text
-    commercial_text = " ".join(
-        ans for qid, ans in answers.items()
-        if any(kw in qid.lower() for kw in ["price", "cost", "commercial", "fee", "rate"])
-    ) or " ".join(list(answers.values())[-5:])   # fallback: last 5 answers
-
-    prices = extract_prices_from_text(commercial_text, rfp_full_text, supplier_name)
+    # ── Price extraction ───────────────────────────────────────────────────────────
+    # Use the full document text (not just answer snippets) so the pricing
+    # sheet / commercial table is always included in the extraction pass.
+    pricing_text = full_text or " ".join(answers.values())
+    prices = extract_prices_from_text(pricing_text, rfp_full_text, supplier_name)
 
     summary = generate_supplier_summary(
         supplier_name      = supplier_name,
@@ -104,20 +104,20 @@ def _analyse_one_supplier(
     )
 
     return {
-        "supplier_name":    supplier_name,
-        "overall_score":    split["overall_score"],
-        "technical_score":  split["technical_score"],
-        "commercial_score": split["commercial_score"],
-        "category_scores":  category_results,
+        "supplier_name":     supplier_name,
+        "overall_score":     split["overall_score"],
+        "technical_score":   split["technical_score"],
+        "commercial_score":  split["commercial_score"],
+        "category_scores":   category_results,
         "flagged_questions": flagged_count,
-        "prices":           prices,
-        "strengths":        summary.get("strengths", []),
-        "weaknesses":       summary.get("weaknesses", []),
-        "recommendation":   summary.get("recommendation", ""),
+        "prices":            prices,
+        "strengths":         summary.get("strengths", []),
+        "weaknesses":        summary.get("weaknesses", []),
+        "recommendation":    summary.get("recommendation", ""),
     }
 
 
-# ── Main analysis orchestrator ──────────────────────────────────────────────────────────
+# ── Main analysis orchestrator ───────────────────────────────────────────────────────────
 
 def _do_analysis(
     rfp_id: str,
@@ -138,23 +138,38 @@ def _do_analysis(
 
     questions = json.loads(questions_path.read_text())
 
-    # Parse RFP for pricing context
-    rfp_doc      = parse_document(str(rfp_path))
+    rfp_doc       = parse_document(str(rfp_path))
     rfp_full_text = rfp_doc.get("full_text", "")
 
-    # Step 1: Extract answers from all suppliers
+    # Step 1: Parse all supplier documents and resolve their display names.
+    # Name resolution priority:
+    #   1. Explicit name stored in suppliers.json at upload time
+    #   2. Company name extracted by LLM from document header
+    #   3. Filename stem as last resort
     parsed_suppliers = []
     for sp in supplier_paths:
         parsed    = parse_document(str(sp))
         full_text = parsed.get("full_text", "")
         result    = extract_supplier_answers(full_text, questions)
-        meta_name = supplier_names.get(str(sp)) or supplier_names.get(sp.name)
-        if meta_name:
-            result["supplier_name"] = meta_name
+
+        meta_name = (
+            supplier_names.get(str(sp))
+            or supplier_names.get(sp.name)
+        )
+        if meta_name and meta_name != sp.stem:
+            # Explicit name was set and is not just the filename stem — use it
+            display_name = meta_name
+        else:
+            # Try to read company name from the document itself
+            llm_name = extract_supplier_name_from_text(full_text, sp.stem)
+            display_name = llm_name or meta_name or sp.stem
+
+        result["supplier_name"] = display_name
+        result["full_text"]     = full_text   # carry full text for pricing extraction
         parsed_suppliers.append(result)
 
-    # Step 2: Build cross-supplier answer map for quantitative context
-    cross_answers: dict = {}
+    # Step 2: Cross-supplier answer map for quantitative context
+    cross_answers: Dict = {}
     for sup in parsed_suppliers:
         for qid, ans in sup.get("answers", {}).items():
             cross_answers.setdefault(qid, {})[sup["supplier_name"]] = ans
@@ -183,9 +198,8 @@ def _do_analysis(
                     "recommendation": f"Analysis failed: {e}",
                 })
 
-    # Step 4: Build price comparison table
-    # Merge per-supplier price lists into a cross-supplier table
-    price_map: Dict[str, Dict[str, str]] = {}   # {line_item: {supplier: value}}
+    # Step 4: Build price comparison table from full-document pricing extraction
+    price_map:   Dict[str, Dict[str, str]] = {}
     price_units: Dict[str, str] = {}
     for sup_result in suppliers_output:
         sname = sup_result["supplier_name"]
@@ -198,9 +212,9 @@ def _do_analysis(
 
     price_comparison = [
         PriceComparison(
-            line_item  = li,
-            suppliers  = price_map[li],
-            unit       = price_units.get(li, ""),
+            line_item = li,
+            suppliers = price_map[li],
+            unit      = price_units.get(li, ""),
         ).dict()
         for li in sorted(price_map)
     ]
@@ -245,7 +259,7 @@ async def _run_analysis_job(
         job_store.set_failed(job_id, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────────────
+# ── Routes ──────────────────────────────────────────────────────────────
 
 @router.post("/run")
 async def run_analysis(req: AnalysisRequest, background_tasks: BackgroundTasks):
