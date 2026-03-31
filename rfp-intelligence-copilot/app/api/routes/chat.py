@@ -23,7 +23,7 @@ from app.services.feature_flags import flag_enabled
 router = APIRouter()
 
 
-# ── Request / response models ────────────────────────────────────────────────
+# ── Request / response models ─────────────────────────────────────────────
 
 class ChatMessage(BaseModel):
     role: str      # "user" | "assistant"
@@ -44,7 +44,7 @@ class ChatResponse(BaseModel):
 # EXISTING ENDPOINT — extended, backward-compatible
 # ════════════════════════════════════════════════════════════════════════════
 
-@router.post("", response_model=ChatResponse)
+@router.post("/message", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
 ):
