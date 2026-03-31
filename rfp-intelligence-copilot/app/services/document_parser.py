@@ -31,9 +31,9 @@ def _parse_excel(file_path: str) -> Dict[str, Any]:
         df = pd.read_excel(file_path, sheet_name=sheet_name)
         df = df.fillna("")
         sheets[sheet_name] = df.to_dict(orient="records")
-        # Convert to readable text for LLM
+        # Use CSV format — denser and cleaner for the LLM than to_string()
         text = f"=== Sheet: {sheet_name} ===\n"
-        text += df.to_string(index=False)
+        text += df.to_csv(index=False)
         full_text_parts.append(text)
     return {
         "type": "excel",
@@ -47,7 +47,7 @@ def _parse_csv(file_path: str) -> Dict[str, Any]:
     return {
         "type": "csv",
         "sheets": {"Sheet1": df.to_dict(orient="records")},
-        "full_text": df.to_string(index=False),
+        "full_text": df.to_csv(index=False),
     }
 
 
@@ -68,7 +68,6 @@ def _parse_pdf(file_path: str) -> Dict[str, Any]:
 def _parse_docx(file_path: str) -> Dict[str, Any]:
     doc = docx.Document(file_path)
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    # Also extract tables
     table_texts = []
     for table in doc.tables:
         for row in table.rows:

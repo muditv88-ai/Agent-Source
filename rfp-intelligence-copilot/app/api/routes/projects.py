@@ -161,7 +161,10 @@ def _do_parse_project(project_id: str) -> dict:
         raise FileNotFoundError("No RFP file found in project")
     parsed_doc = parse_document(str(rfp_path))
     full_text  = parsed_doc.get("full_text", "")
-    extracted  = extract_rfp_questions(full_text)
+    # Pass the project metadata dir as cache_dir so repeated parses of the
+    # same file content are served instantly from disk.
+    cache_dir  = str(PROJECTS_DIR / project_id / "metadata")
+    extracted  = extract_rfp_questions(full_text, cache_dir=cache_dir)
     raw_qs     = extracted.get("questions", [])
     questions  = [
         RFPQuestion(
@@ -240,7 +243,6 @@ async def rename_project_supplier(project_id: str, filename: str, body: Supplier
         raise HTTPException(status_code=400, detail="new_name must not be empty")
 
     meta = load_metadata(project_id, "suppliers.json") or {}
-    # Find the key(s) that match this filename (path key or bare filename)
     matched = [k for k in meta if Path(k).name == filename or k == filename]
     if not matched:
         raise HTTPException(status_code=404, detail=f"Supplier file '{filename}' not found in project")

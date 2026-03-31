@@ -2,6 +2,7 @@
 import os
 import json
 import re
+import hashlib
 import concurrent.futures
 from openai import OpenAI
 from typing import Dict, Any, List
@@ -12,8 +13,8 @@ client = OpenAI(
 )
 
 MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
-CHUNK_MAX_CHARS = 20000   # larger chunks = fewer LLM calls
-MAX_WORKERS = 6           # parallel chunk processing
+CHUNK_MAX_CHARS = 8000    # smaller chunks = faster per-call latency
+MAX_WORKERS = 10          # more parallel calls to compensate
 
 SYSTEM_PROMPT = """
 You are an expert procurement analyst. Extract all evaluation questions from an RFP document section.
@@ -111,7 +112,7 @@ def _extract_from_chunk(chunk_text: str, chunk_index: int) -> Dict:
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=8192,
     )
     result = _parse_json(_extract_content(response))
     print(f"[rfp_extractor] chunk {chunk_index}: {len(result.get('questions', []))} questions found")
@@ -131,11 +132,28 @@ def _split_into_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]
     return chunks
 
 
-def extract_rfp_questions(document_text: str) -> Dict[str, Any]:
+def _file_hash(text: str) -> str:
+    """MD5 of the full document text — used as cache key."""
+    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def extract_rfp_questions(document_text: str, cache_dir: str = None) -> Dict[str, Any]:
     """
     Extract structured questions from ALL sections of the RFP.
     Chunks are processed in parallel to handle large documents quickly.
+
+    If cache_dir is provided, results are cached by document hash so
+    re-parsing the same file is instant.
     """
+    # ── Cache check ──────────────────────────────────────────────────────────
+    doc_hash = _file_hash(document_text)
+    if cache_dir:
+        from pathlib import Path
+        cache_path = Path(cache_dir) / f"parse_cache_{doc_hash}.json"
+        if cache_path.exists():
+            print(f"[rfp_extractor] cache HIT for hash {doc_hash[:8]} — skipping LLM calls")
+            return json.loads(cache_path.read_text())
+
     sections = re.split(r"(?=^=== Sheet:)", document_text, flags=re.MULTILINE)
     sections = [s.strip() for s in sections if s.strip()]
     if not sections:
@@ -179,7 +197,14 @@ def extract_rfp_questions(document_text: str) -> Dict[str, Any]:
         all_categories.update(result.get("categories", []))
 
     print(f"[rfp_extractor] total questions extracted: {len(all_questions)}")
-    return {
+    output = {
         "questions": all_questions,
         "categories": sorted(all_categories),
     }
+
+    # ── Cache write ──────────────────────────────────────────────────────────
+    if cache_dir:
+        cache_path.write_text(json.dumps(output, indent=2))
+        print(f"[rfp_extractor] cache WRITE for hash {doc_hash[:8]}")
+
+    return output
