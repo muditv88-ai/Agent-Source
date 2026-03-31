@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.health import router as health_router
+from app.api.routes.auth import router as auth_router
 from app.api.routes.rfp import router as rfp_router
 from app.api.routes.analysis import router as analysis_router
 from app.api.routes.scenarios import router as scenarios_router
@@ -10,11 +11,9 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.pricing import router as pricing_router
 from app.api.routes.projects import router as projects_router
 
-app = FastAPI(title="RFP Intelligence Copilot", version="1.1.0")
+app = FastAPI(title="RFP Intelligence Copilot", version="1.2.0")
 
-origins = [
-    "*"  # change this in production!
-]
+origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +25,7 @@ app.add_middleware(
 
 # Routers
 app.include_router(health_router)
+app.include_router(auth_router,           prefix="/auth",           tags=["Auth"])
 app.include_router(projects_router,       prefix="/projects",       tags=["Projects"])
 app.include_router(rfp_router,            prefix="/rfp",            tags=["RFP"])
 app.include_router(analysis_router,       prefix="/analysis",       tags=["Analysis"])
@@ -39,17 +39,5 @@ app.include_router(pricing_router,        prefix="/pricing",        tags=["Prici
 def root():
     return {
         "message": "RFP Intelligence Copilot API is running",
-        "version": "1.1.0",
-        "endpoints": [
-            "/health",
-            "/projects",
-            "/projects/{id}/rfp",
-            "/projects/{id}/supplier",
-            "/projects/{id}/parse",
-            "/projects/{id}/analyze",
-            "/rfp/upload",
-            "/chat/message",
-            "/pricing/analyze",
-            "/docs",
-        ],
+        "version": "1.2.0",
     }
