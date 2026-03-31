@@ -1,5 +1,5 @@
 """
-ai_scorer.py — dual-LLM scoring with price analysis.
+ai_scorer.py — dual-LLM scoring with price and name analysis.
 
 Primary model  : nvidia/llama-3.1-nemotron-ultra-253b-v1  (NVIDIA)
 Checker model  : meta/llama-3.3-70b-instruct              (NVIDIA, faster)
@@ -10,7 +10,9 @@ Flow:
   3. If |primary - checker| > DISAGREEMENT_THRESHOLD, scores are averaged
      and the question is flagged for human review.
   4. Price extraction uses a dedicated prompt to pull structured pricing
-     from Commercial/Pricing sections.
+     from the FULL supplier document text (not just answer snippets).
+  5. Supplier name extraction reads the document header/intro to identify
+     the company name, avoiding reliance on filenames.
 """
 import os
 import json
@@ -26,9 +28,9 @@ client = OpenAI(
 
 PRIMARY_MODEL  = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
 CHECKER_MODEL  = "meta/llama-3.3-70b-instruct"
-DISAGREEMENT_THRESHOLD = 2.0   # flag if |primary - checker| >= this
+DISAGREEMENT_THRESHOLD = 2.0
 
-# ── Prompts ───────────────────────────────────────────────────────────────────
+# ── Prompts ──────────────────────────────────────────────────────────────────
 
 SCORING_SYSTEM = """
 You are an expert procurement evaluator. Score a supplier's answer to an RFP question.
@@ -47,8 +49,9 @@ Return ONLY valid JSON, nothing else:
 """
 
 PRICE_EXTRACTION_SYSTEM = """
-You are a pricing analyst. Extract ALL line-item prices from the text below.
+You are a pricing analyst. Extract ALL line-item prices from the supplier document below.
 Match items to the RFP template structure where possible.
+Search the ENTIRE document, including any pricing sheets, commercial tables, BOQ, or rate cards.
 
 Return ONLY valid JSON array:
 [
@@ -56,6 +59,20 @@ Return ONLY valid JSON array:
   ...
 ]
 If no prices found return [].
+"""
+
+SUPPLIER_NAME_SYSTEM = """
+You are a document analyst. Read the beginning of this supplier RFP response document.
+Identify the name of the COMPANY that submitted this response.
+
+Look for:
+- Company name on cover page or header
+- "Submitted by: <company>"
+- "Prepared by: <company>"
+- Letterhead or signature block company name
+
+Return ONLY a JSON object: {"company_name": "Acme Corp Ltd"}
+If you cannot determine the company name with confidence, return: {"company_name": ""}
 """
 
 
@@ -133,11 +150,6 @@ def score_question(
     all_supplier_answers: Dict[str, str] = None,
     dual_llm: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Score a single question.
-    Returns dict with: score, primary_score, checker_score, score_delta,
-                       flagged, rationale, checker_rationale.
-    """
     context = ""
     if all_supplier_answers and question["question_type"] == "quantitative":
         context = "\nOther suppliers' answers for context:\n" + "".join(
@@ -153,7 +165,6 @@ def score_question(
         f"{context}"
     )
 
-    # Run primary always; run checker only when dual_llm=True
     if dual_llm:
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_primary = ex.submit(_call_model, PRIMARY_MODEL, SCORING_SYSTEM, prompt, 256)
@@ -174,8 +185,6 @@ def score_question(
     c_score = float(checker["score"])
     delta   = abs(p_score - c_score)
     flagged = delta >= DISAGREEMENT_THRESHOLD
-
-    # Reconcile: average when flagged, use primary otherwise
     final_score = round((p_score + c_score) / 2, 2) if flagged else p_score
 
     return {
@@ -198,10 +207,6 @@ def score_questions_parallel(
     dual_llm: bool = True,
     max_workers: int = 8,
 ) -> Dict[str, Dict]:
-    """
-    Score all questions for one supplier in parallel threads.
-    Returns {question_id: score_data}.
-    """
     results: Dict[str, Dict] = {}
 
     def _score_one(q):
@@ -224,7 +229,36 @@ def score_questions_parallel(
     return results
 
 
-# ── Price extraction ──────────────────────────────────────────────────────────────────
+# ── Supplier name extraction ───────────────────────────────────────────────────────────
+
+def extract_supplier_name_from_text(
+    full_text: str,
+    filename_stem: str = "",
+) -> str:
+    """
+    Extract the submitting company name from the document text.
+    Reads only the first 2000 chars (cover page / header area).
+    Returns the company name string, or "" if not found.
+    Filename stem is passed only as context hint — never returned directly.
+    """
+    if not full_text:
+        return ""
+    sample = full_text[:2000]
+    hint   = f'\n(The file was named "{filename_stem}" — use only as a hint, not as the answer.)' if filename_stem else ""
+    prompt = f"{sample}{hint}"
+    try:
+        raw    = _call_model(CHECKER_MODEL, SUPPLIER_NAME_SYSTEM, prompt, 128)
+        parsed = _parse_json(raw)
+        name   = (parsed.get("company_name") or "").strip()
+        # Sanity check: reject very short or obviously bad names
+        if len(name) < 2 or name.lower() in ("unknown", "n/a", "na", "supplier", ""):
+            return ""
+        return name
+    except Exception:
+        return ""
+
+
+# ── Price extraction ───────────────────────────────────────────────────────────────────
 
 def extract_prices_from_text(
     text: str,
@@ -232,27 +266,28 @@ def extract_prices_from_text(
     supplier_name: str = "",
 ) -> List[Dict]:
     """
-    Extract line-item prices from a supplier's commercial/pricing section.
-    Uses rfp_template_text to align items to the RFP structure.
+    Extract line-item prices from the supplier's FULL document text.
+    Searches the entire document so pricing sheets are always captured.
     Returns list of {line_item, value, unit}.
     """
     context = ""
     if rfp_template_text:
         context = f"\nRFP template pricing structure for reference:\n{rfp_template_text[:1000]}\n"
 
+    # Use up to 6000 chars (covers most pricing tables in multi-page docs)
     prompt = (
         f"{context}"
         f"Supplier: {supplier_name}\n"
-        f"Text to extract prices from:\n{text[:2000]}"
+        f"Full document text:\n{text[:6000]}"
     )
     try:
-        raw  = _call_model(CHECKER_MODEL, PRICE_EXTRACTION_SYSTEM, prompt, 512)
+        raw  = _call_model(CHECKER_MODEL, PRICE_EXTRACTION_SYSTEM, prompt, 1024)
         return _parse_json_array(raw)
     except Exception:
         return []
 
 
-# ── Supplier summary ──────────────────────────────────────────────────────────────────
+# ── Supplier summary ───────────────────────────────────────────────────────────────────
 
 def generate_supplier_summary(
     supplier_name: str,
