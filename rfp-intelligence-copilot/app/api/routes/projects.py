@@ -1,10 +1,13 @@
 """
-projects.py  v2.0
+projects.py  v2.1
 
 ALL EXISTING ENDPOINTS ARE PRESERVED EXACTLY.
-New endpoints appended at the bottom — no routes renamed or removed.
+New endpoints appended at the bottom.
 
-New endpoints (v2.0):
+New in v2.1:
+  PATCH  /projects/{id}/supplier/{filename}/name  — rename a supplier display name
+
+New in v2.0:
   PATCH  /projects/{id}/meta              — update optional project metadata
   GET    /projects/{id}/module-states     — read module completion states
   PATCH  /projects/{id}/module-states     — update one module state
@@ -20,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
+from pydantic import BaseModel
 
 from app.services.project_store import (
     create_project, get_project, list_projects, delete_project,
@@ -107,7 +111,6 @@ async def upload_project_rfp(project_id: str, file: UploadFile = File(...)):
     data = await file.read()
     save_rfp_file(project_id, file.filename, data)
     update_project_meta(project_id, rfp_filename=file.filename, status="rfp_uploaded")
-    # v2.0: advance RFP module state
     update_module_state(project_id, "rfp", "active")
     return {"project_id": project_id, "rfp_filename": file.filename, "status": "rfp_uploaded"}
 
@@ -125,17 +128,17 @@ async def upload_project_supplier(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"Unsupported file type '{suffix}'")
     data = await file.read()
-    local_path   = save_supplier_file(project_id, file.filename, data)
+    local_path    = save_supplier_file(project_id, file.filename, data)
     resolved_name = (supplier_name or "").strip() or Path(file.filename).stem
     meta = load_metadata(project_id, "suppliers.json") or {}
     meta[str(local_path)] = resolved_name
     save_metadata(project_id, "suppliers.json", meta)
     update_project_meta(project_id, status="suppliers_uploaded")
     return {
-        "project_id":       project_id,
+        "project_id":        project_id,
         "supplier_filename": file.filename,
-        "supplier_name":    resolved_name,
-        "status":           "supplier_uploaded",
+        "supplier_name":     resolved_name,
+        "status":            "supplier_uploaded",
     }
 
 
@@ -173,7 +176,6 @@ def _do_parse_project(project_id: str) -> dict:
     ]
     save_metadata(project_id, "questions.json", [q.dict() for q in questions])
     update_project_meta(project_id, status="parsed")
-    # v2.0: mark RFP module complete
     update_module_state(project_id, "rfp", "complete")
     return {
         "project_id":      project_id,
@@ -217,15 +219,43 @@ async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
 
 
 # ════════════════════════════════════════════════════════════════════════════
+# NEW v2.1 ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+class SupplierRenameRequest(BaseModel):
+    new_name: str
+
+
+@router.patch("/{project_id}/supplier/{filename}/name")
+async def rename_project_supplier(project_id: str, filename: str, body: SupplierRenameRequest):
+    """
+    Update the display name of an already-uploaded supplier file.
+    Writes directly into suppliers.json without requiring a re-upload.
+    """
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    new_name = body.new_name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="new_name must not be empty")
+
+    meta = load_metadata(project_id, "suppliers.json") or {}
+    # Find the key(s) that match this filename (path key or bare filename)
+    matched = [k for k in meta if Path(k).name == filename or k == filename]
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Supplier file '{filename}' not found in project")
+    for k in matched:
+        meta[k] = new_name
+    save_metadata(project_id, "suppliers.json", meta)
+    return {"project_id": project_id, "filename": filename, "supplier_name": new_name}
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # NEW v2.0 ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.patch("/{project_id}/meta")
 async def update_project_metadata(project_id: str, body: ProjectMetaUpdateRequest):
-    """
-    Update optional project metadata fields.
-    Only provided (non-None) fields are written — all others are preserved.
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -238,10 +268,6 @@ async def update_project_metadata(project_id: str, body: ProjectMetaUpdateReques
 
 @router.get("/{project_id}/module-states")
 async def get_project_module_states(project_id: str):
-    """
-    Return completion state of each module for this project.
-    States: pending | active | complete | error
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -253,11 +279,6 @@ async def get_project_module_states(project_id: str):
 
 @router.patch("/{project_id}/module-states")
 async def set_project_module_state(project_id: str, body: ModuleStateUpdateRequest):
-    """
-    Update the state of one module.
-    module: rfp | technical | pricing
-    state:  pending | active | complete | error
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -270,10 +291,6 @@ async def set_project_module_state(project_id: str, body: ModuleStateUpdateReque
 
 @router.get("/{project_id}/audit-log")
 async def get_project_audit_log(project_id: str, limit: int = 50):
-    """
-    Return the most recent audit log entries for this project.
-    Entries are written by the chatbot and pricing scenario engine.
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -283,10 +300,6 @@ async def get_project_audit_log(project_id: str, limit: int = 50):
 
 @router.get("/{project_id}/feature-flags")
 async def get_project_feature_flags(project_id: str):
-    """
-    Return all feature flags for this project.
-    Unset flags return their safe defaults.
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -298,10 +311,6 @@ async def get_project_feature_flags(project_id: str):
 
 @router.patch("/{project_id}/feature-flags")
 async def update_project_feature_flags(project_id: str, body: FeatureFlagUpdateRequest):
-    """
-    Toggle one or more feature flags for this project.
-    Only provided (non-None) fields are updated.
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
