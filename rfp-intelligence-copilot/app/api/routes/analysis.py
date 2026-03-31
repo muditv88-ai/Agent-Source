@@ -8,8 +8,8 @@ from fastapi.responses import FileResponse
 from app.models.schemas import AnalysisRequest
 from app.services.job_store import job_store, JobStatus
 from app.services.supplier_parser import extract_supplier_answers
-from app.services.aggregator import aggregate_scores
-from app.services.ai_scorer import score_suppliers
+from app.services.aggregator import aggregate_scores, compute_overall_score
+from app.services.ai_scorer import score_question, generate_supplier_summary
 from app.services.document_parser import parse_document
 
 router = APIRouter()
@@ -50,26 +50,79 @@ def _do_analysis(rfp_id: str, project_id: str = None) -> dict:
 
     questions = json.loads(questions_path.read_text())
 
+    # Load supplier name overrides from metadata
     supplier_names: dict = {}
-    if suppliers_meta_path.exists():
+    if suppliers_meta_path and suppliers_meta_path.exists():
         supplier_names = json.loads(suppliers_meta_path.read_text())
 
-    # Parse each supplier document and extract answers
-    supplier_data = []
+    # Step 1: Extract answers from each supplier document
+    parsed_suppliers = []
     for sp in supplier_paths:
         parsed = parse_document(str(sp))
         full_text = parsed.get("full_text", "")
-        # Resolve supplier name from metadata (keyed by full path string)
-        name = supplier_names.get(str(sp)) or supplier_names.get(sp.name) or sp.stem
         result = extract_supplier_answers(full_text, questions)
-        # Override supplier name from metadata if available
-        if name and name != "Unknown Supplier":
-            result["supplier_name"] = name
-        supplier_data.append(result)
+        # Prefer metadata name over LLM-detected name
+        meta_name = supplier_names.get(str(sp)) or supplier_names.get(sp.name)
+        if meta_name:
+            result["supplier_name"] = meta_name
+        parsed_suppliers.append(result)
 
-    scored = score_suppliers(supplier_data, questions)
-    result = aggregate_scores(scored, rfp_id)
-    return result
+    # Step 2: Build cross-supplier answer map for quantitative context
+    # {question_id: {supplier_name: answer}}
+    cross_answers: dict = {}
+    for sup in parsed_suppliers:
+        for qid, ans in sup.get("answers", {}).items():
+            cross_answers.setdefault(qid, {})[sup["supplier_name"]] = ans
+
+    # Step 3: Score each supplier
+    suppliers_output = []
+    for sup in parsed_suppliers:
+        supplier_name = sup["supplier_name"]
+        answers = sup.get("answers", {})
+
+        # Score every question
+        question_scores: dict = {}
+        for q in questions:
+            qid = q["question_id"]
+            answer = answers.get(qid, "No response provided")
+            # Pass other suppliers' answers for quantitative context
+            other_answers = {k: v for k, v in cross_answers.get(qid, {}).items() if k != supplier_name}
+            try:
+                score_data = score_question(q, answer, other_answers)
+            except Exception:
+                score_data = {"score": 0, "rationale": "Scoring failed"}
+            question_scores[qid] = score_data
+
+        # Aggregate to category level
+        category_results = aggregate_scores(questions, question_scores, answers, supplier_name)
+        overall = compute_overall_score(category_results, questions)
+
+        # Generate AI summary
+        try:
+            summary = generate_supplier_summary(supplier_name, category_results, overall)
+        except Exception:
+            summary = {"strengths": [], "weaknesses": [], "recommendation": ""}
+
+        suppliers_output.append({
+            "supplier_name": supplier_name,
+            "overall_score": overall,
+            "category_scores": category_results,
+            "strengths": summary.get("strengths", []),
+            "weaknesses": summary.get("weaknesses", []),
+            "recommendation": summary.get("recommendation", ""),
+        })
+
+    # Sort by overall score descending
+    suppliers_output.sort(key=lambda x: x["overall_score"], reverse=True)
+    for i, s in enumerate(suppliers_output):
+        s["rank"] = i + 1
+
+    return {
+        "rfp_id": rfp_id,
+        "suppliers": suppliers_output,
+        "total_questions": len(questions),
+        "categories": list({q["category"] for q in questions}),
+    }
 
 
 async def _run_analysis_job(rfp_id: str, job_id: str, project_id: str = None):
@@ -84,7 +137,7 @@ async def _run_analysis_job(rfp_id: str, job_id: str, project_id: str = None):
         job_store.set_failed(job_id, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────
+# ── Routes ─────────────────────────────────────────────────────────────────
 
 @router.post("/run")
 async def run_analysis(req: AnalysisRequest, background_tasks: BackgroundTasks):
