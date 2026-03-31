@@ -1,326 +1,464 @@
 """
-pricing_analyzer.py
+pricing_analyzer.py v2
 
-Builds cost models and runs award scenarios across suppliers:
-1. Total Cost per Supplier
-2. Best of Best (lowest per line item)
-3. Overall Best Supplier (lowest total)
-4. Market Basket 2 (optimal split across 2 suppliers by category)
-5. Market Basket 3 (optimal split across 3 suppliers by category)
-6. AI Award Strategy Recommendation
+All maths done in pure Python (no LLM).
+
+Scenarios:
+  1. Total cost per supplier  (L1 / L2 / L3 ranking)
+  2. Best of Best             (cheapest per SKU/line-item, any supplier)
+  3. Optimised Award — per SKU   (min total cost, award each item independently)
+  4. Optimised Award — per Category (award entire category to cheapest supplier)
+  5. Market Basket (2-supplier split, both per-SKU and per-category)
+  6. Market Basket (3-supplier split, both per-SKU and per-category)
+  7. Award recommendation    (compare all scenarios, recommend best risk-adjusted)
+
+Data contract:
+  Input : list of extract_pricing_from_document() dicts
+  Output: dict ready to be JSON-serialised and stored
 """
-import json
 from itertools import combinations
 from typing import Any
 
 
-# ── Cost model builder ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cost model
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def build_cost_model(suppliers_pricing: list[dict]) -> dict:
     """
-    suppliers_pricing: list of extract_pricing_from_document() outputs.
-    Returns a unified cost model keyed by description.
+    Build a unified cost model.
+
+    Returns:
+        suppliers      : list of supplier names
+        descriptions   : ordered list of all SKU/line-item descriptions
+        matrix         : {description: {supplier: {unit_price, quantity, total, category, unit, sku, notes}}}
+        category_matrix: {category: {supplier: total_cost}}
     """
-    # Collect all unique line item descriptions across suppliers
-    all_descriptions = []
-    seen = set()
+    suppliers = [sp["supplier_name"] for sp in suppliers_pricing]
+
+    # Collect all unique descriptions — preserve first-seen order
+    seen, all_descs = set(), []
     for sp in suppliers_pricing:
         for item in sp.get("all_line_items", []):
             d = item["description"].strip()
             if d and d not in seen:
-                all_descriptions.append(d)
+                all_descs.append(d)
                 seen.add(d)
-    
-    # Build matrix: description -> {supplier_name: {unit_price, total, qty, category}}
+
+    # Build SKU-level matrix
     matrix: dict[str, dict] = {}
-    for desc in all_descriptions:
+    for desc in all_descs:
         matrix[desc] = {}
         for sp in suppliers_pricing:
             sname = sp["supplier_name"]
             match = next(
                 (i for i in sp.get("all_line_items", []) if i["description"].strip() == desc),
-                None
+                None,
             )
-            if match:
+            if match and match["total"] > 0:
                 matrix[desc][sname] = {
+                    "sku":        match.get("sku", ""),
                     "unit_price": match["unit_price"],
                     "quantity":   match["quantity"],
                     "total":      match["total"],
                     "category":   match["category"],
-                    "notes":      match["notes"],
+                    "unit":       match.get("unit", "each"),
+                    "notes":      match.get("notes", ""),
                 }
             else:
-                matrix[desc][sname] = None  # supplier did not price this item
-    
+                matrix[desc][sname] = None
+
+    # Build category-level aggregation
+    cat_matrix: dict[str, dict[str, float]] = {}
+    for sp in suppliers_pricing:
+        sname = sp["supplier_name"]
+        for item in sp.get("all_line_items", []):
+            cat = (item.get("category") or "Uncategorised").strip()
+            cat_matrix.setdefault(cat, {})
+            cat_matrix[cat][sname] = round(
+                cat_matrix[cat].get(sname, 0.0) + item["total"], 2
+            )
+
     return {
-        "descriptions": all_descriptions,
-        "suppliers":    [sp["supplier_name"] for sp in suppliers_pricing],
-        "matrix":       matrix,
+        "suppliers":       suppliers,
+        "descriptions":    all_descs,
+        "matrix":          matrix,
+        "category_matrix": cat_matrix,
     }
 
 
-# ── Scenario 1: Total cost per supplier ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scenario 1 — Total cost / L1-L2-L3 ranking
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def scenario_total_cost(suppliers_pricing: list[dict]) -> list[dict]:
     results = []
     for sp in suppliers_pricing:
-        total = sp.get("total_cost", 0.0)
-        by_category: dict[str, float] = {}
+        by_cat: dict[str, float] = {}
         for item in sp.get("all_line_items", []):
-            cat = item["category"] or "Uncategorised"
-            by_category[cat] = round(by_category.get(cat, 0.0) + item["total"], 2)
+            cat = (item.get("category") or "Uncategorised").strip()
+            by_cat[cat] = round(by_cat.get(cat, 0.0) + item["total"], 2)
         results.append({
-            "supplier_name": sp["supplier_name"],
-            "total_cost":    round(total, 2),
-            "by_category":   by_category,
+            "supplier_name":   sp["supplier_name"],
+            "total_cost":      round(sp.get("total_cost", 0.0), 2),
+            "by_category":     by_cat,
             "line_item_count": len(sp.get("all_line_items", [])),
         })
     results.sort(key=lambda x: x["total_cost"])
     for i, r in enumerate(results):
-        r["rank"] = i + 1
+        r["rank"]  = i + 1
+        r["label"] = f"L{i + 1}"  # L1 = cheapest
     return results
 
 
-# ── Scenario 2: Best of best ──────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scenario 2 — Best of Best (per SKU, any supplier)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def scenario_best_of_best(cost_model: dict) -> dict:
     """
     For each line item, pick the supplier with the lowest total.
-    Returns total cost and a breakdown of which supplier wins each item.
+    This is the theoretical floor — achievable only by splitting every item.
     """
     matrix      = cost_model["matrix"]
     suppliers   = cost_model["suppliers"]
     breakdown   = []
-    total       = 0.0
-    savings_vs  = {s: 0.0 for s in suppliers}  # savings vs awarding 100% to each supplier
-    
-    for desc, supplier_map in matrix.items():
-        priced = {s: v for s, v in supplier_map.items() if v is not None and v["total"] > 0}
+    grand_total = 0.0
+    wins: dict[str, int] = {s: 0 for s in suppliers}
+
+    for desc, smap in matrix.items():
+        priced = {s: v for s, v in smap.items() if v is not None and v["total"] > 0}
         if not priced:
             continue
-        best_supplier = min(priced, key=lambda s: priced[s]["total"])
-        best_val      = priced[best_supplier]
-        total        += best_val["total"]
-        
+        best_s   = min(priced, key=lambda s: priced[s]["total"])
+        best_val = priced[best_s]
+        grand_total += best_val["total"]
+        wins[best_s] = wins.get(best_s, 0) + 1
+
         breakdown.append({
-            "description":    desc,
-            "best_supplier":  best_supplier,
-            "best_total":     best_val["total"],
+            "description":     desc,
+            "sku":             best_val.get("sku", ""),
+            "category":        best_val["category"],
+            "best_supplier":   best_s,
             "best_unit_price": best_val["unit_price"],
-            "quantity":       best_val["quantity"],
-            "category":       best_val["category"],
-            "all_prices":     {s: v["total"] if v else None for s, v in supplier_map.items()},
+            "best_total":      best_val["total"],
+            "quantity":        best_val["quantity"],
+            "unit":            best_val.get("unit", "each"),
+            "all_prices":      {s: (v["total"] if v else None) for s, v in smap.items()},
+            "all_unit_prices": {s: (v["unit_price"] if v else None) for s, v in smap.items()},
+            "savings_vs_worst": _savings_vs_worst(priced),
         })
-    
-    wins_by_supplier: dict[str, int] = {s: 0 for s in suppliers}
-    for b in breakdown:
-        wins_by_supplier[b["best_supplier"]] = wins_by_supplier.get(b["best_supplier"], 0) + 1
-    
+
     return {
-        "scenario": "best_of_best",
-        "total_cost": round(total, 2),
-        "breakdown": breakdown,
-        "wins_by_supplier": wins_by_supplier,
+        "scenario":        "best_of_best",
+        "total_cost":      round(grand_total, 2),
+        "breakdown":       breakdown,
+        "wins_by_supplier": wins,
+        "description":     "Lowest price per SKU across all suppliers — theoretical minimum",
     }
 
 
-# ── Scenario 3: Overall best supplier ────────────────────────────────────────
+def _savings_vs_worst(priced: dict) -> float:
+    if len(priced) < 2:
+        return 0.0
+    vals = [v["total"] for v in priced.values()]
+    return round(max(vals) - min(vals), 2)
 
-def scenario_overall_best(total_cost_results: list[dict]) -> dict:
-    best = total_cost_results[0] if total_cost_results else None
-    if not best:
-        return {"scenario": "overall_best", "supplier_name": None, "total_cost": 0}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scenario 3 — Optimised Award (two modes)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def scenario_optimised_award_sku(cost_model: dict) -> dict:
+    """
+    Per-SKU optimised award: award each line item to cheapest supplier.
+    Identical to Best-of-Best but explicitly labelled as an award scenario
+    and includes supplier consolidation analysis.
+    """
+    bob = scenario_best_of_best(cost_model)
+    suppliers_used = {b["best_supplier"] for b in bob["breakdown"]}
+    award_split = {}
+    for b in bob["breakdown"]:
+        s = b["best_supplier"]
+        award_split[s] = award_split.get(s, 0.0) + b["best_total"]
+
     return {
-        "scenario":      "overall_best",
-        "supplier_name": best["supplier_name"],
-        "total_cost":    best["total_cost"],
-        "by_category":   best["by_category"],
-        "vs_others":     [
-            {
-                "supplier_name": r["supplier_name"],
-                "their_total":   r["total_cost"],
-                "saving":        round(r["total_cost"] - best["total_cost"], 2),
-                "saving_pct":    round((r["total_cost"] - best["total_cost"]) / r["total_cost"] * 100, 1)
-                                 if r["total_cost"] > 0 else 0,
-            }
-            for r in total_cost_results[1:]
-        ],
+        "scenario":         "optimised_award_sku",
+        "total_cost":       bob["total_cost"],
+        "breakdown":        bob["breakdown"],
+        "suppliers_used":   sorted(suppliers_used),
+        "award_split":      {s: round(v, 2) for s, v in award_split.items()},
+        "supplier_count":   len(suppliers_used),
+        "description":      "Award each SKU to cheapest supplier — maximum savings, higher complexity",
     }
 
 
-# ── Market basket helper ──────────────────────────────────────────────────────
+def scenario_optimised_award_category(cost_model: dict) -> dict:
+    """
+    Per-category optimised award: award each category to cheapest supplier.
+    Lower complexity than per-SKU (fewer POs, easier to manage).
+    """
+    cat_matrix  = cost_model["category_matrix"]
+    suppliers   = cost_model["suppliers"]
+    allocation  = {}   # {category: {supplier, cost}}
+    grand_total = 0.0
+    award_split: dict[str, float] = {}
 
-def _market_basket(cost_model: dict, n_suppliers: int) -> list[dict]:
-    """
-    For each combination of n_suppliers, find the optimal category split
-    that minimises total cost (each category awarded to cheapest of the combo).
-    """
+    for cat, smap in cat_matrix.items():
+        if not smap:
+            continue
+        best_s    = min(smap, key=lambda s: smap.get(s, float("inf")))
+        best_cost = smap[best_s]
+        grand_total += best_cost
+        allocation[cat] = {
+            "awarded_to": best_s,
+            "cost":       round(best_cost, 2),
+            "all_costs":  {s: round(smap.get(s, 0), 2) for s in suppliers},
+        }
+        award_split[best_s] = round(award_split.get(best_s, 0.0) + best_cost, 2)
+
+    suppliers_used = set(v["awarded_to"] for v in allocation.values())
+    return {
+        "scenario":        "optimised_award_category",
+        "total_cost":      round(grand_total, 2),
+        "allocation":      allocation,
+        "suppliers_used":  sorted(suppliers_used),
+        "award_split":     award_split,
+        "supplier_count":  len(suppliers_used),
+        "description":     "Award each category to cheapest supplier — balanced savings and simplicity",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scenario 4 — Market Basket (n-supplier splits)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _market_basket_sku(cost_model: dict, n: int) -> list[dict]:
+    """Per-SKU market basket: best price per item within a fixed n-supplier combo."""
     matrix    = cost_model["matrix"]
     suppliers = cost_model["suppliers"]
-    
-    if len(suppliers) < n_suppliers:
+    if len(suppliers) < n:
         return []
-    
-    # Build category totals per supplier
-    cat_totals: dict[str, dict[str, float]] = {}
-    for desc, supplier_map in matrix.items():
-        for sname, val in supplier_map.items():
-            if val is None:
-                continue
-            cat = val["category"] or "Uncategorised"
-            if cat not in cat_totals:
-                cat_totals[cat] = {}
-            cat_totals[cat][sname] = cat_totals[cat].get(sname, 0.0) + val["total"]
-    
     results = []
-    for combo in combinations(suppliers, n_suppliers):
+    for combo in combinations(suppliers, n):
         total = 0.0
-        allocation: dict[str, str] = {}
-        cat_costs: dict[str, dict] = {}
-        
-        for cat, totals in cat_totals.items():
-            combo_totals = {s: totals.get(s, float("inf")) for s in combo}
-            best_s = min(combo_totals, key=lambda s: combo_totals[s])
-            best_cost = combo_totals[best_s]
-            if best_cost == float("inf"):
+        breakdown = []
+        for desc, smap in matrix.items():
+            priced = {s: smap[s] for s in combo if smap.get(s) and smap[s]["total"] > 0}
+            if not priced:
                 continue
-            total           += best_cost
-            allocation[cat]  = best_s
-            cat_costs[cat]   = {"awarded_to": best_s, "cost": round(best_cost, 2),
-                                "all_costs": {s: round(combo_totals[s], 2) for s in combo}}
-        
+            best_s   = min(priced, key=lambda s: priced[s]["total"])
+            best_val = priced[best_s]
+            total   += best_val["total"]
+            breakdown.append({
+                "description":   desc,
+                "best_supplier": best_s,
+                "best_total":    best_val["total"],
+                "all_prices":    {s: (priced[s]["total"] if s in priced else None) for s in combo},
+            })
+        award_split = {}
+        for b in breakdown:
+            award_split[b["best_supplier"]] = round(
+                award_split.get(b["best_supplier"], 0.0) + b["best_total"], 2
+            )
         results.append({
-            "suppliers":  list(combo),
-            "total_cost": round(total, 2),
-            "allocation": allocation,
-            "category_detail": cat_costs,
+            "suppliers":   list(combo),
+            "total_cost":  round(total, 2),
+            "breakdown":   breakdown,
+            "award_split": award_split,
+            "mode":        "per_sku",
         })
-    
     results.sort(key=lambda x: x["total_cost"])
     return results
 
 
-# ── Scenario 4 & 5: Market basket ────────────────────────────────────────────
+def _market_basket_category(cost_model: dict, n: int) -> list[dict]:
+    """Per-category market basket: best category cost within a fixed n-supplier combo."""
+    cat_matrix = cost_model["category_matrix"]
+    suppliers  = cost_model["suppliers"]
+    if len(suppliers) < n:
+        return []
+    results = []
+    for combo in combinations(suppliers, n):
+        total      = 0.0
+        allocation = {}
+        for cat, smap in cat_matrix.items():
+            combo_costs = {s: smap.get(s, float("inf")) for s in combo}
+            best_s      = min(combo_costs, key=lambda s: combo_costs[s])
+            best_cost   = combo_costs[best_s]
+            if best_cost == float("inf"):
+                continue
+            total          += best_cost
+            allocation[cat] = {
+                "awarded_to": best_s,
+                "cost":       round(best_cost, 2),
+                "all_costs":  {s: round(combo_costs[s], 2) for s in combo
+                               if combo_costs[s] != float("inf")},
+            }
+        award_split = {}
+        for cat, detail in allocation.items():
+            s = detail["awarded_to"]
+            award_split[s] = round(award_split.get(s, 0.0) + detail["cost"], 2)
+        results.append({
+            "suppliers":   list(combo),
+            "total_cost":  round(total, 2),
+            "allocation":  allocation,
+            "award_split": award_split,
+            "mode":        "per_category",
+        })
+    results.sort(key=lambda x: x["total_cost"])
+    return results
 
-def scenario_market_basket_2(cost_model: dict) -> dict:
-    combos = _market_basket(cost_model, 2)
+
+def scenario_market_basket(cost_model: dict, n: int) -> dict:
+    """Run both per-SKU and per-category market basket for n suppliers."""
+    sku_combos = _market_basket_sku(cost_model, n)
+    cat_combos = _market_basket_category(cost_model, n)
     return {
-        "scenario":     "market_basket_2",
-        "combinations": combos,
-        "best":         combos[0] if combos else None,
+        "scenario":        f"market_basket_{n}",
+        "n_suppliers":     n,
+        "per_sku": {
+            "combinations": sku_combos,
+            "best":         sku_combos[0] if sku_combos else None,
+        },
+        "per_category": {
+            "combinations": cat_combos,
+            "best":         cat_combos[0] if cat_combos else None,
+        },
     }
 
 
-def scenario_market_basket_3(cost_model: dict) -> dict:
-    combos = _market_basket(cost_model, 3)
-    return {
-        "scenario":     "market_basket_3",
-        "combinations": combos,
-        "best":         combos[0] if combos else None,
-    }
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scenario 5 — Custom (built at runtime by scenario_engine)
+# ═══════════════════════════════════════════════════════════════════════════════
+# (see scenario_engine.py)
 
 
-# ── Scenario 6: Award strategy recommendation ─────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Award recommendation
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def build_award_recommendation(
     total_costs: list[dict],
-    best_of_best: dict,
-    overall_best: dict,
+    bob: dict,
+    opt_sku: dict,
+    opt_cat: dict,
     basket_2: dict,
     basket_3: dict,
 ) -> dict:
-    """
-    Compares all scenarios and recommends the optimal award strategy.
-    """
     candidates = [
-        {"strategy": "Overall Best Supplier",  "total": overall_best.get("total_cost", 0),
-         "complexity": "Low",  "risk": "Low",  "suppliers_involved": 1},
-        {"strategy": "Best of Best",            "total": best_of_best.get("total_cost", 0),
-         "complexity": "High", "risk": "High", "suppliers_involved": len(best_of_best.get("wins_by_supplier", {}))},
+        {
+            "strategy":          "L1 — Single Supplier (Lowest Total)",
+            "total":             total_costs[0]["total_cost"] if total_costs else 0,
+            "complexity":        "Low",
+            "risk":              "Low",
+            "suppliers_involved": 1,
+        },
+        {
+            "strategy":    "Best of Best (per SKU, all suppliers)",
+            "total":       bob.get("total_cost", 0),
+            "complexity":  "Very High",
+            "risk":        "High",
+            "suppliers_involved": len([s for s, w in bob.get("wins_by_supplier", {}).items() if w > 0]),
+        },
+        {
+            "strategy":    "Optimised Award — per SKU",
+            "total":       opt_sku.get("total_cost", 0),
+            "complexity":  "High",
+            "risk":        "Medium",
+            "suppliers_involved": opt_sku.get("supplier_count", 0),
+        },
+        {
+            "strategy":    "Optimised Award — per Category",
+            "total":       opt_cat.get("total_cost", 0),
+            "complexity":  "Medium",
+            "risk":        "Low",
+            "suppliers_involved": opt_cat.get("supplier_count", 0),
+        },
     ]
-    if basket_2.get("best"):
+    if basket_2.get("per_category", {}).get("best"):
+        b = basket_2["per_category"]["best"]
         candidates.append({
-            "strategy": "Market Basket (2 Suppliers)",
-            "total": basket_2["best"]["total_cost"],
-            "complexity": "Medium", "risk": "Medium",
+            "strategy":    "Market Basket — 2 Suppliers (per Category)",
+            "total":       b["total_cost"],
+            "complexity":  "Medium",
+            "risk":        "Low",
             "suppliers_involved": 2,
-            "suppliers": basket_2["best"]["suppliers"],
-            "allocation": basket_2["best"]["allocation"],
+            "suppliers":   b["suppliers"],
         })
-    if basket_3.get("best"):
+    if basket_3.get("per_category", {}).get("best"):
+        b = basket_3["per_category"]["best"]
         candidates.append({
-            "strategy": "Market Basket (3 Suppliers)",
-            "total": basket_3["best"]["total_cost"],
-            "complexity": "High", "risk": "Medium",
+            "strategy":    "Market Basket — 3 Suppliers (per Category)",
+            "total":       b["total_cost"],
+            "complexity":  "Medium",
+            "risk":        "Medium",
             "suppliers_involved": 3,
-            "suppliers": basket_3["best"]["suppliers"],
-            "allocation": basket_3["best"]["allocation"],
+            "suppliers":   b["suppliers"],
         })
-    
-    # Sort by total cost
+
+    # Remove zero-total candidates (no data)
+    candidates = [c for c in candidates if c["total"] > 0]
     candidates.sort(key=lambda x: x["total"])
-    lowest = candidates[0]
-    
-    # Compute savings vs most expensive strategy
-    max_total = max(c["total"] for c in candidates) if candidates else 0
+
+    max_total = max((c["total"] for c in candidates), default=0)
     for c in candidates:
         c["saving_vs_worst"]     = round(max_total - c["total"], 2)
-        c["saving_vs_worst_pct"] = round((max_total - c["total"]) / max_total * 100, 1) if max_total > 0 else 0
-    
-    # Recommended = lowest cost unless complexity is High — then prefer Medium if saving < 5%
-    recommended = lowest
-    if lowest["complexity"] == "High":
-        medium_candidates = [c for c in candidates if c["complexity"] in ("Low", "Medium")]
-        if medium_candidates:
-            medium_best = medium_candidates[0]
-            saving_diff = lowest["total"] - medium_best["total"]
-            # If best-of-best only saves < 3% vs medium, prefer medium for simplicity
-            if abs(saving_diff) / (medium_best["total"] or 1) < 0.03:
-                recommended = medium_best
-    
+        c["saving_vs_worst_pct"] = round((max_total - c["total"]) / max_total * 100, 1) if max_total else 0
+
+    # Recommend lowest-cost unless it's Very High complexity;
+    # then prefer Medium if cost difference < 3%
+    recommended = candidates[0] if candidates else {}
+    if recommended.get("complexity") == "Very High":
+        med = [c for c in candidates if c["complexity"] in ("Low", "Medium")]
+        if med:
+            diff_pct = (candidates[0]["total"] - med[0]["total"]) / (med[0]["total"] or 1)
+            if abs(diff_pct) < 0.03:
+                recommended = med[0]
+
     rationale = [
-        f"Lowest total cost: {recommended['strategy']} at {recommended['total']:,.2f}",
-        f"Involves {recommended['suppliers_involved']} supplier(s) — {recommended['complexity'].lower()} management complexity",
-        f"Saves {recommended['saving_vs_worst_pct']}% vs the highest-cost strategy",
+        f"Recommended: {recommended.get('strategy')} at {recommended.get('total', 0):,.2f}",
+        f"{recommended.get('suppliers_involved', 0)} supplier(s) — "
+        f"{recommended.get('complexity', '')} complexity, {recommended.get('risk', '')} risk",
+        f"Saves {recommended.get('saving_vs_worst_pct', 0):.1f}% vs highest-cost strategy",
     ]
-    if recommended.get("allocation"):
-        for cat, supplier in recommended["allocation"].items():
-            rationale.append(f"  • {cat}: award to {supplier}")
-    
+
     return {
-        "recommended_strategy": recommended["strategy"],
-        "recommended_total":    recommended["total"],
+        "recommended_strategy": recommended.get("strategy", ""),
+        "recommended_total":    recommended.get("total", 0),
         "rationale":            rationale,
         "all_strategies":       candidates,
-        "savings_opportunity":  round(max_total - recommended["total"], 2),
+        "savings_opportunity":  round(max_total - recommended.get("total", 0), 2),
     }
 
 
-# ── Master runner ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Master runner
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def run_pricing_analysis(suppliers_pricing: list[dict]) -> dict:
-    """
-    Run all 5 scenarios + award recommendation.
-    suppliers_pricing: list of extract_pricing_from_document() outputs.
-    """
     if not suppliers_pricing:
         return {"error": "No supplier pricing data provided"}
-    
-    cost_model   = build_cost_model(suppliers_pricing)
-    total_costs  = scenario_total_cost(suppliers_pricing)
-    bob          = scenario_best_of_best(cost_model)
-    overall_best = scenario_overall_best(total_costs)
-    basket_2     = scenario_market_basket_2(cost_model)
-    basket_3     = scenario_market_basket_3(cost_model)
-    award_rec    = build_award_recommendation(total_costs, bob, overall_best, basket_2, basket_3)
-    
+
+    cost_model  = build_cost_model(suppliers_pricing)
+    total_costs = scenario_total_cost(suppliers_pricing)
+    bob         = scenario_best_of_best(cost_model)
+    opt_sku     = scenario_optimised_award_sku(cost_model)
+    opt_cat     = scenario_optimised_award_category(cost_model)
+    basket_2    = scenario_market_basket(cost_model, 2)
+    basket_3    = scenario_market_basket(cost_model, 3)
+    award_rec   = build_award_recommendation(
+        total_costs, bob, opt_sku, opt_cat, basket_2, basket_3
+    )
+
     return {
-        "suppliers":         [sp["supplier_name"] for sp in suppliers_pricing],
-        "cost_model":        cost_model,
-        "total_costs":       total_costs,
-        "best_of_best":      bob,
-        "overall_best":      overall_best,
-        "market_basket_2":   basket_2,
-        "market_basket_3":   basket_3,
-        "award_recommendation": award_rec,
+        "suppliers":                [sp["supplier_name"] for sp in suppliers_pricing],
+        "cost_model":               cost_model,
+        "total_costs":              total_costs,          # L1/L2/L3
+        "best_of_best":             bob,
+        "optimised_award_sku":      opt_sku,
+        "optimised_award_category": opt_cat,
+        "market_basket_2":          basket_2,
+        "market_basket_3":          basket_3,
+        "award_recommendation":     award_rec,
     }
