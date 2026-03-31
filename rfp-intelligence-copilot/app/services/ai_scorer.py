@@ -133,8 +133,8 @@ def _call_model(model: str, system: str, user: str, max_tokens: int = 256) -> st
     resp = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": "detailed thinking off"},
-            {"role": "user",   "content": f"{system}\n\n{user}"},
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user},
         ],
         temperature=0.1,
         max_tokens=max_tokens,
