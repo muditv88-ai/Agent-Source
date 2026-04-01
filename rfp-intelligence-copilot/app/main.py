@@ -1,9 +1,9 @@
 """
-main.py  v4.2
+main.py  v4.3
 
-Fixes v4.1 ImportError: check_deadlines is private (_check_deadlines).
-Now delegates scheduling entirely to deadline_agent.start_deadline_scheduler()
-which is the correct public API.
+Fix: router prefix alignment with frontend api.ts calls.
+  - pricing_router:  /pricing        → /pricing-analysis
+  - analysis_router: /analysis       → /technical-analysis
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 # ── App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RFP Intelligence Copilot",
-    version="4.2.0",
+    version="4.3.0",
     description="AI-powered procurement automation — RFP generation, bid evaluation, supplier onboarding.",
     lifespan=lifespan,
 )
@@ -68,19 +68,19 @@ except RuntimeError:
     pass
 
 # ── Routers ──────────────────────────────────────────────────────────
-app.include_router(health_router,         prefix="/health",         tags=["Health"])
-app.include_router(auth_router,           prefix="/auth",           tags=["Auth"])
-app.include_router(projects_router,       prefix="/projects",       tags=["Projects"])
-app.include_router(rfp_router,            prefix="/rfp",            tags=["RFP"])
-app.include_router(analysis_router,       prefix="/analysis",       tags=["Analysis"])
-app.include_router(pricing_router,        prefix="/pricing",        tags=["Pricing"])
-app.include_router(scenarios_router,      prefix="/scenarios",      tags=["Scenarios"])
-app.include_router(chat_router,           prefix="/chat",           tags=["Chat"])
-app.include_router(communications_router, prefix="/communications", tags=["Communications"])
-app.include_router(suppliers_router,      prefix="/suppliers",      tags=["Suppliers"])
-app.include_router(drawings_router,       prefix="/drawings",       tags=["Drawings"])
+app.include_router(health_router,         prefix="/health",             tags=["Health"])
+app.include_router(auth_router,           prefix="/auth",               tags=["Auth"])
+app.include_router(projects_router,       prefix="/projects",           tags=["Projects"])
+app.include_router(rfp_router,            prefix="/rfp",                tags=["RFP"])
+app.include_router(analysis_router,       prefix="/technical-analysis", tags=["Analysis"])  # was /analysis
+app.include_router(pricing_router,        prefix="/pricing-analysis",   tags=["Pricing"])   # was /pricing
+app.include_router(scenarios_router,      prefix="/scenarios",          tags=["Scenarios"])
+app.include_router(chat_router,           prefix="/chat",               tags=["Chat"])
+app.include_router(communications_router, prefix="/communications",     tags=["Communications"])
+app.include_router(suppliers_router,      prefix="/suppliers",          tags=["Suppliers"])
+app.include_router(drawings_router,       prefix="/drawings",           tags=["Drawings"])
 
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "version": "4.2.0", "service": "RFP Intelligence Copilot"}
+    return {"status": "ok", "version": "4.3.0", "service": "RFP Intelligence Copilot"}
