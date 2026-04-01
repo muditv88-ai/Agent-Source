@@ -1,74 +1,67 @@
 """
-rfp.py  v3.0
+rfp.py  v4.0  — DB-backed
 
-New endpoints added (existing endpoints UNCHANGED for backward compat):
-  POST /rfp/generate                       — AI-generate a new RFP from category + scope
-  POST /rfp/upload-supplier-response       — Intake a supplier response via ResponseIntakeAgent
-  POST /rfp/{project_id}/questions/weights — Update question weights for a project
-  GET  /rfp/{project_id}/completeness      — Return response completeness per supplier
+All TODO stubs replaced with real SQLModel reads/writes via get_db().
+All existing v3 endpoints preserved for backward compatibility.
 """
-from typing import Any, Dict, List, Optional
-import os
+from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+import json as _json
+from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
-# ── existing service imports (UNCHANGED) ─────────────────────────────────
-from app.services.rfp_extractor    import extract_rfp_questions
-from app.services.document_parser  import extract_text
-from app.services.supplier_parser  import parse_supplier_response
+from app.db import get_db
+from app.models.rfp import RFP, RFPQuestion
+from app.models.bid import BidResponse
 
-# ── new agent imports ─────────────────────────────────────────────────────
+from app.services.rfp_extractor   import extract_rfp_questions
+from app.services.document_parser import extract_text
+from app.services.supplier_parser import parse_supplier_response
+
 from app.agents.rfp_generation_agent  import RFPGenerationAgent
 from app.agents.response_intake_agent import ResponseIntakeAgent
 
 router = APIRouter()
 
 
-# ── Pydantic models ────────────────────────────────────────────────────────
+# ── Pydantic request models ────────────────────────────────────────────────
 
 class RFPGenerateRequest(BaseModel):
     category:     str
     scope:        str
     requirements: Optional[str] = ""
     project_id:   Optional[str] = None
+    title:        Optional[str] = None
+    deadline:     Optional[str] = None   # ISO datetime string
 
 class WeightUpdateRequest(BaseModel):
-    weights: Dict[str, float]   # {category_name: weight_0_to_100}
-
-class SupplierResponseUploadRequest(BaseModel):
-    project_id: str
-    supplier_name: Optional[str] = None
+    weights: dict   # {section_name: weight_0_to_100}
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# EXISTING ENDPOINTS — preserved exactly, no changes
-# (original rfp.py content inlined below for backward compat)
+# EXISTING ENDPOINTS (unchanged)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.post("/extract")
 async def extract_rfp(
-    file: UploadFile = File(...),
-    project_id: Optional[str] = Form(None),
+    file:       UploadFile       = File(...),
+    project_id: Optional[str]   = Form(None),
 ):
-    """
-    Extract structured questions from an uploaded RFP document.
-    Supports PDF, DOCX, XLSX, TXT.
-    """
     file_bytes = await file.read()
     try:
         text = extract_text(file_bytes, file.filename)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse file: {e}")
-
+        raise HTTPException(422, detail=f"Failed to parse file: {e}")
     if not text or not text.strip():
-        raise HTTPException(status_code=422, detail="No text content found in uploaded file.")
-
+        raise HTTPException(422, detail="No text content found in uploaded file.")
     try:
         result = extract_rfp_questions(text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"RFP extraction failed: {e}")
-
+        raise HTTPException(500, detail=f"RFP extraction failed: {e}")
     result["project_id"] = project_id
     result["source_file"] = file.filename
     return result
@@ -76,38 +69,34 @@ async def extract_rfp(
 
 @router.post("/parse-supplier-response")
 async def parse_supplier(
-    file: UploadFile = File(...),
-    questions: str   = Form(...),   # JSON-encoded list of question dicts
+    file:       UploadFile     = File(...),
+    questions:  str            = Form(...),
     project_id: Optional[str] = Form(None),
 ):
-    """
-    Parse a supplier's response file against a set of RFP questions.
-    Existing endpoint — backward compatible.
-    """
-    import json as _json
     file_bytes = await file.read()
     try:
-        text = extract_text(file_bytes, file.filename)
+        text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
-
+        raise HTTPException(422, detail=str(e))
     result = parse_supplier_response(text, rfp_questions)
-    result["project_id"] = project_id
+    result["project_id"]  = project_id
     result["source_file"] = file.filename
     return result
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v3.0 ENDPOINTS
+# v4.0  DB-BACKED ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.post("/generate")
-async def generate_rfp(payload: RFPGenerateRequest):
+async def generate_rfp(
+    payload: RFPGenerateRequest,
+    db:      Session = Depends(get_db),
+):
     """
-    AI-generate a new RFP from category and scope description.
-    Uses RFPGenerationAgent backed by NVIDIA Nemotron.
-    Returns: full RFP text + structured questions list.
+    AI-generate an RFP and persist it + its questions to the DB.
+    Returns the saved RFP id alongside the agent output.
     """
     agent = RFPGenerationAgent()
     try:
@@ -118,31 +107,74 @@ async def generate_rfp(payload: RFPGenerateRequest):
             "requirements": payload.requirements or "",
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    result["project_id"] = payload.project_id
+        raise HTTPException(500, detail=str(e))
+
+    # Persist RFP record
+    rfp = RFP(
+        project_id=payload.project_id or result.get("project_id", ""),
+        title=payload.title or f"{payload.category} RFP",
+        category=payload.category,
+        scope=payload.scope,
+        status="draft",
+        submission_deadline=datetime.fromisoformat(payload.deadline) if payload.deadline else None,
+    )
+    db.add(rfp)
+    db.flush()   # get rfp.id without committing
+
+    # Persist questions
+    questions: list = result.get("questions", [])
+    for i, q in enumerate(questions):
+        db.add(RFPQuestion(
+            rfp_id=rfp.id,
+            section=q.get("section", "General"),
+            question=q.get("question", q) if isinstance(q, dict) else str(q),
+            weight=0.0,
+            required=True,
+            order=i,
+        ))
+    db.commit()
+    db.refresh(rfp)
+
+    result["rfp_id"]     = rfp.id
+    result["project_id"] = rfp.project_id
     return result
+
+
+@router.get("/list")
+def list_rfps(db: Session = Depends(get_db)):
+    """Return all RFPs ordered by creation date descending."""
+    rfps = db.exec(select(RFP).order_by(RFP.created_at.desc())).all()
+    return {"rfps": [r.model_dump() for r in rfps], "total": len(rfps)}
+
+
+@router.get("/{rfp_id}")
+def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
+    rfp = db.get(RFP, rfp_id)
+    if not rfp:
+        raise HTTPException(404, detail="RFP not found")
+    questions = db.exec(select(RFPQuestion).where(RFPQuestion.rfp_id == rfp_id).order_by(RFPQuestion.order)).all()
+    return {**rfp.model_dump(), "questions": [q.model_dump() for q in questions]}
 
 
 @router.post("/upload-supplier-response")
 async def upload_supplier_response(
-    file: UploadFile = File(...),
-    project_id: str  = Form(...),
-    questions: str   = Form(...),   # JSON-encoded list of question dicts
+    file:       UploadFile = File(...),
+    project_id: str        = Form(...),
+    questions:  str        = Form(...),
+    rfp_id:     Optional[str] = Form(None),
+    supplier_id: Optional[str] = Form(None),
+    db:         Session    = Depends(get_db),
 ):
     """
-    Upload a supplier response file. ResponseIntakeAgent:
-      1. Extracts supplier name
-      2. Maps answers to RFP questions
-      3. Calculates completeness %
-      4. Auto-sends clarification request if incomplete
+    Upload a supplier response. ResponseIntakeAgent maps answers to questions,
+    calculates completeness %, and the BidResponse is persisted to DB.
     """
-    import json as _json
     file_bytes = await file.read()
     try:
-        text = extract_text(file_bytes, file.filename)
+        text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(422, detail=str(e))
 
     agent = ResponseIntakeAgent()
     try:
@@ -152,44 +184,75 @@ async def upload_supplier_response(
             "project_id":    project_id,
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, detail=str(e))
+
+    # Persist BidResponse
+    if rfp_id and supplier_id:
+        bid = BidResponse(
+            rfp_id=rfp_id,
+            supplier_id=supplier_id,
+            source_file=file.filename,
+            completeness_pct=result.get("completeness_pct", 0.0),
+            status="received",
+        )
+        db.add(bid)
+        db.commit()
+        db.refresh(bid)
+        result["bid_response_id"] = bid.id
+
     result["source_file"] = file.filename
     return result
 
 
-@router.post("/{project_id}/questions/weights")
-async def update_question_weights(
-    project_id: str,
+@router.post("/{rfp_id}/questions/weights")
+def update_question_weights(
+    rfp_id:  str,
     payload: WeightUpdateRequest,
+    db:      Session = Depends(get_db),
 ):
     """
-    Update evaluation question weights for a project.
-    Weights are per-category (e.g. {"Technical": 60, "Pricing": 30, "Compliance": 10}).
+    Persist per-section question weights to the DB.
+    Weights dict: {section_name: weight} — must sum to 100.
     """
-    # TODO: persist to DB; for now return acknowledgement
     total = sum(payload.weights.values())
     if abs(total - 100.0) > 0.5:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Weights must sum to 100. Got {total}."
-        )
-    return {
-        "project_id": project_id,
-        "weights":    payload.weights,
-        "status":     "updated",
-        "note":       "Weights will be applied in next TechnicalAnalysisAgent run.",
-    }
+        raise HTTPException(422, detail=f"Weights must sum to 100. Got {total:.1f}.")
+
+    questions = db.exec(select(RFPQuestion).where(RFPQuestion.rfp_id == rfp_id)).all()
+    if not questions:
+        raise HTTPException(404, detail="No questions found for this RFP.")
+
+    for q in questions:
+        if q.section in payload.weights:
+            q.weight = payload.weights[q.section]
+    db.commit()
+    return {"rfp_id": rfp_id, "weights": payload.weights, "status": "updated"}
 
 
 @router.get("/{project_id}/completeness")
-async def get_response_completeness(project_id: str):
+def get_response_completeness(project_id: str, db: Session = Depends(get_db)):
     """
-    Return supplier response completeness stats for a project.
-    Full implementation requires DB persistence; returns structure only.
+    Return supplier response completeness stats for all bids under a project.
     """
-    # TODO: query DB for intake results keyed by project_id
-    return {
-        "project_id": project_id,
-        "suppliers":  [],
-        "note": "Wire to DB after persistence layer is added.",
-    }
+    rfps = db.exec(select(RFP).where(RFP.project_id == project_id)).all()
+    rfp_ids = [r.id for r in rfps]
+
+    if not rfp_ids:
+        return {"project_id": project_id, "suppliers": [], "note": "No RFPs found for this project."}
+
+    bids = db.exec(
+        select(BidResponse).where(BidResponse.rfp_id.in_(rfp_ids))
+    ).all()
+
+    suppliers = [
+        {
+            "bid_response_id":  b.id,
+            "supplier_id":      b.supplier_id,
+            "rfp_id":           b.rfp_id,
+            "completeness_pct": b.completeness_pct,
+            "status":           b.status,
+            "submitted_at":     b.submitted_at.isoformat(),
+        }
+        for b in bids
+    ]
+    return {"project_id": project_id, "suppliers": suppliers, "total": len(suppliers)}

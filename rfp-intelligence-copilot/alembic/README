@@ -1,0 +1,12 @@
+RFP Intelligence Copilot — Alembic migrations
+
+Quick reference:
+  alembic upgrade head              # apply all pending migrations
+  alembic revision --autogenerate -m "add column x"   # generate new migration
+  alembic downgrade -1              # roll back one migration
+  alembic history                   # list migration history
+
+The DATABASE_URL env var overrides the SQLite dev default in alembic.ini.
+For production PostgreSQL:
+  export DATABASE_URL=postgresql+psycopg2://<user>:<pw>@<host>/<db>
+  alembic upgrade head

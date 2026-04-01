@@ -1,236 +1,234 @@
 """
-suppliers.py  NEW — v3.0
+suppliers.py  v4.0  — DB-backed
 
-Supplier directory management + agentic onboarding flow.
-
-Endpoints:
-  GET  /suppliers                          — list all suppliers
-  POST /suppliers                          — create / register a supplier
-  GET  /suppliers/{supplier_id}            — get supplier details
-  POST /suppliers/{supplier_id}/invite     — send onboarding invite via SupplierOnboardingAgent
-  POST /suppliers/{supplier_id}/validate   — validate submitted onboarding docs
-  GET  /suppliers/{supplier_id}/status     — get onboarding status + completeness
-  POST /suppliers/bulk-invite              — send invites to multiple suppliers for a project
+All supplier CRUD and onboarding endpoints now read/write via SQLModel.
 """
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from __future__ import annotations
+
+import os
 import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
+from sqlmodel import Session, select
 
+from app.db import get_db
+from app.models.supplier import Supplier, SupplierDocument
+from app.models.comms    import CommunicationLog
 from app.agents.supplier_onboarding_agent import SupplierOnboardingAgent
-from app.services.document_parser import extract_text
+from app.agents.comms_agent               import CommsAgent
 
 router = APIRouter()
 
-# ── In-memory store (replace with DB in production) ───────────────────────
-_SUPPLIERS: Dict[str, Dict] = {}
+UPLOAD_DIR = Path("uploads/supplier_docs")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Request / response models ─────────────────────────────────────────────
+# ── Pydantic models ────────────────────────────────────────────────────────
 
-class SupplierCreateRequest(BaseModel):
-    name:    str
-    email:   str
-    contact: Optional[str] = None
-    country: Optional[str] = None
-    category: Optional[str] = None   # e.g. "Manufacturing", "IT Services"
-    notes:   Optional[str] = None
-
-class OnboardingInviteRequest(BaseModel):
-    project_id:   str
-    project_name: Optional[str] = None
-    portal_link:  Optional[str] = "https://sourceiq.app/onboard"
+class SupplierCreate(BaseModel):
+    name:         str
+    email:        str
+    contact_name: Optional[str] = None
+    phone:        Optional[str] = None
+    category:     Optional[str] = None
 
 class BulkInviteRequest(BaseModel):
     supplier_ids: List[str]
     project_id:   str
-    project_name: Optional[str] = None
-    portal_link:  Optional[str] = "https://sourceiq.app/onboard"
+    rfp_title:    Optional[str] = ""
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
-@router.get("")
-async def list_suppliers(
+@router.post("/")
+def create_supplier(payload: SupplierCreate, db: Session = Depends(get_db)):
+    existing = db.exec(select(Supplier).where(Supplier.email == payload.email)).first()
+    if existing:
+        raise HTTPException(409, detail="Supplier with this email already exists.")
+    supplier = Supplier(**payload.model_dump())
+    db.add(supplier)
+    db.commit()
+    db.refresh(supplier)
+    return supplier.model_dump()
+
+
+@router.get("/")
+def list_suppliers(
     category: Optional[str] = None,
     status:   Optional[str] = None,
-    limit:    int = 100,
+    db:       Session       = Depends(get_db),
 ):
-    """List all registered suppliers with optional filters."""
-    suppliers = list(_SUPPLIERS.values())
+    stmt = select(Supplier)
     if category:
-        suppliers = [s for s in suppliers if s.get("category") == category]
+        stmt = stmt.where(Supplier.category == category)
     if status:
-        suppliers = [s for s in suppliers if s.get("onboarding_status") == status]
-    return {
-        "suppliers": suppliers[:limit],
-        "total": len(suppliers),
-    }
-
-
-@router.post("")
-async def create_supplier(payload: SupplierCreateRequest):
-    """Register a new supplier in the directory."""
-    supplier_id = str(uuid.uuid4())
-    supplier = {
-        "supplier_id":        supplier_id,
-        "name":               payload.name,
-        "email":              payload.email,
-        "contact":            payload.contact,
-        "country":            payload.country,
-        "category":           payload.category,
-        "notes":              payload.notes,
-        "onboarding_status":  "not_started",
-        "created_at":         datetime.utcnow().isoformat(),
-    }
-    _SUPPLIERS[supplier_id] = supplier
-    return {"status": "created", "supplier": supplier}
+        stmt = stmt.where(Supplier.status == status)
+    suppliers = db.exec(stmt.order_by(Supplier.name)).all()
+    return {"suppliers": [s.model_dump() for s in suppliers], "total": len(suppliers)}
 
 
 @router.get("/{supplier_id}")
-async def get_supplier(supplier_id: str):
-    """Get supplier profile and onboarding status."""
-    supplier = _SUPPLIERS.get(supplier_id)
+def get_supplier(supplier_id: str, db: Session = Depends(get_db)):
+    supplier = db.get(Supplier, supplier_id)
     if not supplier:
-        raise HTTPException(status_code=404, detail="Supplier not found")
-    return supplier
+        raise HTTPException(404, detail="Supplier not found.")
+    docs = db.exec(select(SupplierDocument).where(SupplierDocument.supplier_id == supplier_id)).all()
+    return {**supplier.model_dump(), "documents": [d.model_dump() for d in docs]}
 
 
 @router.post("/{supplier_id}/invite")
-async def send_onboarding_invite(
+def invite_supplier(
     supplier_id: str,
-    payload: OnboardingInviteRequest,
+    project_id:  str,
+    rfp_title:   str = "",
+    db:          Session = Depends(get_db),
 ):
-    """
-    Send an onboarding invitation email to the supplier.
-    Uses SupplierOnboardingAgent which drafts via CommsAgent LLM.
-    """
-    supplier = _SUPPLIERS.get(supplier_id)
+    supplier = db.get(Supplier, supplier_id)
     if not supplier:
-        raise HTTPException(status_code=404, detail="Supplier not found")
+        raise HTTPException(404, detail="Supplier not found.")
 
-    agent = SupplierOnboardingAgent()
-    try:
-        result = agent.run({
-            "step":           "invite",
-            "supplier_email": supplier["email"],
-            "supplier_name":  supplier["name"],
-            "project_id":     payload.project_id,
-            "portal_link":    payload.portal_link,
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    agent  = CommsAgent()
+    result = agent.run({
+        "email_type":    "rfp_invite",
+        "project_id":   project_id,
+        "supplier_name": supplier.name,
+        "recipient":     supplier.email,
+        "rfp_title":     rfp_title,
+        "send":          True,
+    })
 
-    _SUPPLIERS[supplier_id]["onboarding_status"] = "invited"
-    _SUPPLIERS[supplier_id]["invited_at"] = datetime.utcnow().isoformat()
-    return {"status": "invited", "result": result, "supplier_id": supplier_id}
+    log = CommunicationLog(
+        project_id=project_id,
+        supplier_id=supplier.id,
+        email_type="rfp_invite",
+        recipient=supplier.email,
+        subject=result.get("subject", "RFP Invitation"),
+        body=result.get("body", ""),
+        sent=result.get("sent", False),
+        sent_at=datetime.utcnow() if result.get("sent") else None,
+    )
+    db.add(log)
+    supplier.status = "invited"
+    supplier.updated_at = datetime.utcnow()
+    db.commit()
+    return {"supplier_id": supplier_id, "invited": True, "email_result": result}
 
 
-@router.post("/{supplier_id}/validate")
+@router.post("/{supplier_id}/validate-docs")
 async def validate_supplier_docs(
     supplier_id: str,
-    files: List[UploadFile] = File(...),
+    files:       List[UploadFile] = File(...),
+    db:          Session          = Depends(get_db),
 ):
-    """
-    Validate uploaded onboarding documents against the checklist.
-    SupplierOnboardingAgent checks completeness and auto-requests missing docs.
-    """
-    supplier = _SUPPLIERS.get(supplier_id)
+    supplier = db.get(Supplier, supplier_id)
     if not supplier:
-        raise HTTPException(status_code=404, detail="Supplier not found")
+        raise HTTPException(404, detail="Supplier not found.")
 
-    parsed_docs = []
+    saved_docs = []
     for f in files:
-        content = await f.read()
-        try:
-            text = extract_text(content, f.filename)
-        except Exception:
-            text = ""
-        parsed_docs.append({
-            "doc_type":  _infer_doc_type(f.filename),
-            "filename":  f.filename,
-            "text_len":  len(text),
-        })
+        dest = UPLOAD_DIR / f"{supplier_id}_{uuid.uuid4().hex}_{f.filename}"
+        dest.write_bytes(await f.read())
+        doc_type = _infer_doc_type(f.filename)
+        doc = SupplierDocument(
+            supplier_id=supplier_id,
+            doc_type=doc_type,
+            filename=f.filename,
+            file_path=str(dest),
+        )
+        db.add(doc)
+        saved_docs.append({"filename": f.filename, "doc_type": doc_type})
+    db.flush()
 
-    agent = SupplierOnboardingAgent()
-    try:
-        result = agent.run({
-            "step":          "validate",
-            "supplier_id":   supplier_id,
-            "uploaded_docs": parsed_docs,
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    agent  = SupplierOnboardingAgent()
+    result = agent.run({
+        "supplier_id":   supplier_id,
+        "supplier_name": supplier.name,
+        "recipient":     supplier.email,
+        "documents":     saved_docs,
+    })
 
-    _SUPPLIERS[supplier_id]["onboarding_status"] = result.get("status", "pending_docs")
-    _SUPPLIERS[supplier_id]["completeness_score"] = result.get("completeness_score", 0)
+    # Mark verified docs
+    for doc_name in result.get("verified_docs", []):
+        docs = db.exec(
+            select(SupplierDocument)
+            .where(SupplierDocument.supplier_id == supplier_id)
+            .where(SupplierDocument.filename == doc_name)
+        ).all()
+        for d in docs:
+            d.verified = True
+
+    if result.get("onboarding_complete"):
+        supplier.onboarding_complete = True
+        supplier.status = "active"
+    else:
+        supplier.status = "onboarding"
+    supplier.updated_at = datetime.utcnow()
+    db.commit()
     return result
 
 
 @router.get("/{supplier_id}/status")
-async def get_supplier_onboarding_status(supplier_id: str):
-    """Return current onboarding status and completeness score."""
-    supplier = _SUPPLIERS.get(supplier_id)
+def get_supplier_status(supplier_id: str, db: Session = Depends(get_db)):
+    supplier = db.get(Supplier, supplier_id)
     if not supplier:
-        raise HTTPException(status_code=404, detail="Supplier not found")
+        raise HTTPException(404, detail="Supplier not found.")
+    docs = db.exec(select(SupplierDocument).where(SupplierDocument.supplier_id == supplier_id)).all()
     return {
-        "supplier_id":        supplier_id,
-        "name":               supplier["name"],
-        "onboarding_status":  supplier.get("onboarding_status", "not_started"),
-        "completeness_score": supplier.get("completeness_score", 0),
-        "invited_at":         supplier.get("invited_at"),
+        "supplier_id":          supplier_id,
+        "name":                 supplier.name,
+        "status":               supplier.status,
+        "onboarding_complete":  supplier.onboarding_complete,
+        "documents_submitted":  len(docs),
+        "documents_verified":   sum(1 for d in docs if d.verified),
     }
 
 
 @router.post("/bulk-invite")
-async def bulk_invite_suppliers(payload: BulkInviteRequest):
-    """
-    Send onboarding invitations to multiple suppliers at once.
-    Each invite is processed individually via SupplierOnboardingAgent.
-    """
-    results = {}
-    agent = SupplierOnboardingAgent()
+def bulk_invite(payload: BulkInviteRequest, db: Session = Depends(get_db)):
+    results = []
     for sid in payload.supplier_ids:
-        supplier = _SUPPLIERS.get(sid)
+        supplier = db.get(Supplier, sid)
         if not supplier:
-            results[sid] = {"error": "Supplier not found"}
+            results.append({"supplier_id": sid, "error": "not found"})
             continue
-        try:
-            r = agent.run({
-                "step":           "invite",
-                "supplier_email": supplier["email"],
-                "supplier_name":  supplier["name"],
-                "project_id":     payload.project_id,
-                "portal_link":    payload.portal_link,
-            })
-            results[sid] = {"status": "invited", "result": r}
-            _SUPPLIERS[sid]["onboarding_status"] = "invited"
-        except Exception as e:
-            results[sid] = {"error": str(e)}
-    return {
-        "project_id": payload.project_id,
-        "results": results,
-        "invited_count": sum(1 for r in results.values() if r.get("status") == "invited"),
-    }
+        agent  = CommsAgent()
+        result = agent.run({
+            "email_type":    "rfp_invite",
+            "project_id":   payload.project_id,
+            "supplier_name": supplier.name,
+            "recipient":     supplier.email,
+            "rfp_title":     payload.rfp_title or "",
+            "send":          True,
+        })
+        log = CommunicationLog(
+            project_id=payload.project_id,
+            supplier_id=supplier.id,
+            email_type="rfp_invite",
+            recipient=supplier.email,
+            subject=result.get("subject", "RFP Invitation"),
+            body=result.get("body", ""),
+            sent=result.get("sent", False),
+            sent_at=datetime.utcnow() if result.get("sent") else None,
+        )
+        db.add(log)
+        supplier.status     = "invited"
+        supplier.updated_at = datetime.utcnow()
+        results.append({"supplier_id": sid, "invited": True})
+    db.commit()
+    return {"results": results, "total_invited": sum(1 for r in results if r.get("invited"))}
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────
 
 def _infer_doc_type(filename: str) -> str:
-    """Guess document type from filename keywords."""
-    fn = filename.lower()
-    if any(k in fn for k in ["reg", "incorporat", "certificate"]):
-        return "company_registration"
-    if any(k in fn for k in ["tax", "gst", "vat", "pan"]):
-        return "tax_id"
-    if any(k in fn for k in ["bank", "account"]):
-        return "bank_details"
-    if any(k in fn for k in ["iso", "certif"]):
-        return "iso_certification"
-    if any(k in fn for k in ["insur"]):
-        return "insurance_certificate"
-    if any(k in fn for k in ["contact", "address"]):
-        return "contact_details"
+    name = filename.lower()
+    if any(k in name for k in ("reg", "cert", "incorp")): return "registration"
+    if any(k in name for k in ("tax", "gst", "vat")):     return "tax_cert"
+    if any(k in name for k in ("insur",)):                return "insurance"
+    if any(k in name for k in ("bank", "guarantee")):     return "bank_guarantee"
+    if any(k in name for k in ("iso", "quality")):        return "quality_cert"
     return "other"
