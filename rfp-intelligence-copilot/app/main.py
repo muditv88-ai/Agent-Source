@@ -1,25 +1,23 @@
 """
-main.py  v4.1
+main.py  v4.2
 
-Fixes v4.0 regression: all 8 original routers re-registered.
-Additions vs v3:
-  - create_db_and_tables() in lifespan startup (SQLModel persistence)
-  - APScheduler deadline check (hourly)
-  - Static file mount for uploaded drawings
+Fixes v4.1 ImportError: check_deadlines is private (_check_deadlines).
+Now delegates scheduling entirely to deadline_agent.start_deadline_scheduler()
+which is the correct public API.
 """
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import os
 
 from app.db import create_db_and_tables
-from app.agents.deadline_agent import check_deadlines
+from app.agents.deadline_agent import start_deadline_scheduler, stop_deadline_scheduler
 
-# ── all routers ───────────────────────────────────────────────────────────
+# ── all routers ────────────────────────────────────────────────────────
 from app.api.routes.auth           import router as auth_router
 from app.api.routes.health         import router as health_router
 from app.api.routes.projects       import router as projects_router
@@ -33,31 +31,31 @@ from app.api.routes.suppliers      import router as suppliers_router
 from app.api.routes.drawings       import router as drawings_router
 
 
-# ── Scheduler ─────────────────────────────────────────────────────────────
-_scheduler = BackgroundScheduler()
-_scheduler.add_job(check_deadlines, "interval", hours=1, id="deadline_check")
-
-
-# ── Lifespan ──────────────────────────────────────────────────────────────
+# ── Lifespan ─────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_db_and_tables()   # idempotent — creates tables if not present
-    _scheduler.start()
+    create_db_and_tables()       # idempotent — creates tables if not present
+    start_deadline_scheduler()   # starts APScheduler hourly deadline check
     yield
-    _scheduler.shutdown(wait=False)
+    stop_deadline_scheduler()    # clean shutdown
 
 
-# ── App ───────────────────────────────────────────────────────────────────
+# ── CORS origins ─────────────────────────────────────────────────────
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000")
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+
+# ── App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RFP Intelligence Copilot",
-    version="4.1.0",
+    version="4.2.0",
     description="AI-powered procurement automation — RFP generation, bid evaluation, supplier onboarding.",
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,7 +67,7 @@ try:
 except RuntimeError:
     pass
 
-# ── Routers ───────────────────────────────────────────────────────────────
+# ── Routers ──────────────────────────────────────────────────────────
 app.include_router(health_router,         prefix="/health",         tags=["Health"])
 app.include_router(auth_router,           prefix="/auth",           tags=["Auth"])
 app.include_router(projects_router,       prefix="/projects",       tags=["Projects"])
@@ -85,4 +83,4 @@ app.include_router(drawings_router,       prefix="/drawings",       tags=["Drawi
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "version": "4.1.0", "service": "RFP Intelligence Copilot"}
+    return {"status": "ok", "version": "4.2.0", "service": "RFP Intelligence Copilot"}
