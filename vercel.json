@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://nonecliptical-catabolically-stephenie.ngrok-free.dev/:path*"
+      "destination": "https://muditv88-ai-sourceiq-backend.hf.space/:path*"
     }
   ]
 }
