@@ -17,19 +17,21 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Clone the HF Space repo into a temp directory
-          git clone https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend /tmp/hf-space
-
-          # Wipe existing contents (keep .git)
-          find /tmp/hf-space -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
-
-          # Copy only the subfolder contents into the Space root
-          cp -r rfp-intelligence-copilot/. /tmp/hf-space/
-
-          # Commit and push
+          # Copy only the app subfolder to a temp dir
+          cp -r rfp-intelligence-copilot /tmp/hf-space
           cd /tmp/hf-space
+
+          # Init a fresh git repo and point it at the HF Space
+          git init
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
+
+          # Add HF remote
+          git remote add space https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend
+
+          # Commit everything
           git add -A
-          git diff --cached --quiet || git commit -m "Sync from GitHub: $GITHUB_SHA"
-          git push
+          git commit -m "Sync from GitHub $GITHUB_SHA"
+
+          # Force push to main branch on HF Space
+          git push --force space HEAD:main
