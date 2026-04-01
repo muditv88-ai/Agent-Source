@@ -11,6 +11,11 @@ sqlalchemy>=2.0.30
 alembic>=1.13.0
 psycopg2-binary>=2.9.9
 
+# Auth
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.1
+
 # AI / LLM
 openai>=1.30.0
 tiktoken>=0.7.0
