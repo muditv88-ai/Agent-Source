@@ -2,7 +2,7 @@
 pricing.py — API routes for pricing analysis.
 
 Endpoints:
-  POST /pricing/analyze        — trigger pricing analysis for an RFP
+  POST /pricing/analyze         — trigger pricing analysis for an RFP
   GET  /pricing/status/{job_id} — poll job status
   GET  /pricing/result/{rfp_id} — get latest result
   POST /pricing/correct         — apply user correction to detected structure
@@ -32,10 +32,10 @@ _executor      = ThreadPoolExecutor(max_workers=4)
 _api_semaphore = asyncio.Semaphore(2)
 
 
-# ── Request / Response models ────────────────────────────────────────────
+# ── Request / Response models ──────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
     rfp_id:     str
-    project_id: Optional[str] = None   # ← NEW: forward project context
+    project_id: Optional[str] = None
 
 class PricingCorrectionRequest(BaseModel):
     rfp_id: str
@@ -53,7 +53,7 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────
 def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
     last_err = None
     delay = base_delay
@@ -84,33 +84,49 @@ def _run_in_thread(fn, *args):
     return loop.run_in_executor(_executor, fn, *args)
 
 
-# ── Background job ────────────────────────────────────────────────────────────────
+# ── Background job ──────────────────────────────────────────────────────────────
 async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
     job_store.set_running(job_id)
     try:
-        # ── Resolve files: project-store path takes priority over legacy uploads dir ──
         rfp_path       = None
         supplier_files = []
         name_map       = {}
 
         if project_id:
-            try:
-                from app.services.project_store import (
-                    ensure_rfp_local,
-                    ensure_suppliers_local,
-                    load_metadata,
-                )
-                rfp_path       = ensure_rfp_local(project_id)
-                supplier_files = ensure_suppliers_local(project_id)
-                name_map       = load_metadata(project_id, "suppliers.json") or {}
-            except Exception as proj_err:
-                # Fall through to legacy path on any import / resolution error
-                rfp_path       = None
-                supplier_files = []
-                name_map       = {}
+            # — Primary path: read directly from project_store disk layout —
+            # projects/{project_id}/suppliers/  and  projects/{project_id}/rfp/
+            # This works regardless of whether GCS is configured.
+            from app.services.project_store import (
+                get_rfp_path,
+                get_supplier_paths,
+                load_metadata,
+                ensure_rfp_local,
+                ensure_suppliers_local,
+            )
+
+            # Files are on local disk (saved there on upload in all modes)
+            rfp_path       = get_rfp_path(project_id)
+            supplier_files = get_supplier_paths(project_id)
+
+            # If local disk is empty AND GCS is configured, pull files down first
+            if not supplier_files:
+                try:
+                    ensure_suppliers_local(project_id)
+                    supplier_files = get_supplier_paths(project_id)
+                except Exception:
+                    pass
+
+            if not rfp_path:
+                try:
+                    rfp_path = ensure_rfp_local(project_id)
+                except Exception:
+                    pass
+
+            # Load supplier display-name map (filename → name)
+            name_map = load_metadata(project_id, "suppliers.json") or {}
 
         if not supplier_files:
-            # Legacy (non-project) path
+            # Legacy (non-project) path — files were uploaded to uploads/ directly
             rfp_files      = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
             rfp_path       = rfp_files[0] if rfp_files else None
             supplier_files = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
@@ -123,7 +139,7 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
             )
             return
 
-        # ── Parse RFP to get full template text (column context for LLM) ────────
+        # ── Parse RFP to get full template text (column context for LLM) ────
         rfp_full_text = ""
         if rfp_path and Path(str(rfp_path)).exists():
             try:
@@ -134,16 +150,22 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
             except Exception:
                 rfp_full_text = ""
 
-        # ── Extract pricing from each supplier document ──────────────────────
+        # ── Extract pricing from each supplier document ────────────────────
         suppliers_pricing = []
         for sf in supplier_files:
             sf_path = Path(str(sf))
-            # Resolve supplier display name
+
+            # Resolve supplier display name from metadata map
             supplier_name = (
                 name_map.get(str(sf))
                 or name_map.get(sf_path.name)
                 or sf_path.stem.split("_supplier_")[-1]
             )
+
+            # For project-based uploads, metadata is stored as
+            # { filename: { name: "Display Name" } } or { filename: "Display Name" }
+            if isinstance(name_map.get(sf_path.name), dict):
+                supplier_name = name_map[sf_path.name].get("name", supplier_name)
 
             async with _api_semaphore:
                 parsed = await _run_in_thread(
@@ -156,12 +178,12 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
                 str(sf),
                 supplier_name,
                 full_text,
-                rfp_full_text=rfp_full_text,   # ← FIX: pass RFP template context
+                rfp_full_text=rfp_full_text,
             )
             suppliers_pricing.append(pricing)
             await asyncio.sleep(1)
 
-        result          = run_pricing_analysis(suppliers_pricing)
+        result           = run_pricing_analysis(suppliers_pricing)
         result["rfp_id"] = rfp_id
 
         result_path = META_DIR / f"{rfp_id}_pricing.json"
@@ -182,7 +204,7 @@ async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: Backgrou
         _run_pricing_job,
         req.rfp_id,
         job_id,
-        req.project_id,   # ← FIX: forward project_id
+        req.project_id,
     )
     return JobStartResponse(job_id=job_id, status=JobStatus.PENDING)
 
