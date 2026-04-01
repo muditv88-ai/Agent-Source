@@ -5,11 +5,16 @@ Abstract Agent class + Tool registry.
 All specialist agents inherit from BaseAgent.
 
 Pattern: Plan → Execute (tool call) → Observe → Respond (max MAX_STEPS)
+
+v3.1 additions:
+  - Retry logic with exponential backoff for LLM calls
+  - Configurable timeout per call
+  - Structured error wrapper so callers always get a dict back
 """
-from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Callable
-import json
+import time
 import logging
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, List, Optional
 
 
 class Tool:
@@ -38,6 +43,9 @@ class BaseAgent(ABC):
     """
 
     MAX_STEPS = 5
+    MAX_RETRIES = 3          # maximum LLM call retries
+    RETRY_BACKOFF = 1.5      # seconds multiplier between retries
+    LLM_TIMEOUT = 60         # seconds before a single LLM call is abandoned
 
     def __init__(self, tools: Optional[List[Tool]] = None):
         self.tools: Dict[str, Tool] = {t.name: t for t in (tools or [])}
@@ -59,6 +67,54 @@ class BaseAgent(ABC):
             }
             for t in self.tools.values()
         ]
+
+    def _call_with_retry(self, fn: Callable, *args, **kwargs) -> Any:
+        """
+        Call fn(*args, **kwargs) with exponential backoff on transient errors.
+        Raises the last exception if all retries are exhausted.
+
+        Retries on: RateLimitError, APIConnectionError, Timeout.
+        Does NOT retry on: AuthenticationError, InvalidRequestError.
+        """
+        import openai
+
+        retryable = (
+            openai.RateLimitError,
+            openai.APIConnectionError,
+            openai.APITimeoutError,
+        )
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                return fn(*args, **kwargs)
+            except retryable as e:
+                last_exc = e
+                wait = self.RETRY_BACKOFF * (2 ** attempt)
+                self.logger.warning(
+                    "%s: retryable error (attempt %d/%d) — waiting %.1fs: %s",
+                    self.__class__.__name__, attempt + 1, self.MAX_RETRIES, wait, e,
+                )
+                time.sleep(wait)
+            except Exception as e:
+                # Non-retryable — raise immediately
+                raise
+        raise last_exc  # type: ignore[misc]
+
+    def _safe_run(self, input: Any, context: Optional[Dict] = None) -> Dict:
+        """
+        Wraps run() in a try/except so callers always receive a structured dict.
+        Use this in schedulers and background tasks where unhandled exceptions
+        would silently swallow errors.
+        """
+        try:
+            return self.run(input, context)
+        except Exception as e:
+            self.logger.error("%s.run() failed: %s", self.__class__.__name__, e)
+            return {
+                "error": True,
+                "agent": self.__class__.__name__,
+                "message": str(e),
+            }
 
     @abstractmethod
     def run(self, input: Any, context: Optional[Dict] = None) -> Dict:

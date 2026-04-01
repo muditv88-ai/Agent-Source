@@ -13,6 +13,8 @@ Flow:
   1. First LLM call → may return a tool_call or a direct message
   2. If tool_call → execute the tool → second LLM call to summarise result
   3. Return {message, action}
+
+v3.1: Respects feature flags 'function_calling' and 'chatbot_actions'.
 """
 import os
 import json
@@ -48,7 +50,9 @@ Always be concise and professional.
 class CopilotAgent(BaseAgent):
     """
     Conversational procurement agent with function-calling.
-    Falls back to chat_agent.chat_with_agent() if tool_calls are not returned.
+    Falls back to chat_agent.chat_with_agent() if:
+      - tool_calls are not returned by the model, OR
+      - the 'function_calling' feature flag is disabled for the project.
     """
 
     def __init__(self):
@@ -109,7 +113,6 @@ class CopilotAgent(BaseAgent):
     def _delegate(self, module_name: str, class_name: str, payload: dict) -> dict:
         """Lazy-load and run a specialist agent."""
         import importlib
-
         module = importlib.import_module(module_name)
         AgentClass = getattr(module, class_name)
         return AgentClass().run(payload)
@@ -117,6 +120,28 @@ class CopilotAgent(BaseAgent):
     def run(self, input: dict, context: Optional[Dict] = None) -> dict:
         messages = input.get("messages", [])
         project_context = input.get("context", {})
+        project_id = input.get("project_id", "")
+
+        # --- Feature flag checks ---
+        function_calling_enabled = True
+        chatbot_actions_enabled = True
+        if project_id:
+            try:
+                from app.services.feature_flags import flag_enabled
+                function_calling_enabled = flag_enabled(project_id, "function_calling")
+                chatbot_actions_enabled = flag_enabled(project_id, "chatbot_actions")
+            except Exception:
+                pass  # flag service unavailable — default to enabled
+
+        # If actions are disabled, strip all tools so the LLM answers conversationally only
+        if not chatbot_actions_enabled:
+            self.tools = {}
+
+        # If function-calling is disabled, skip directly to fallback
+        if not function_calling_enabled:
+            logger.info("function_calling flag off for project %s — using chat_agent fallback", project_id)
+            from app.services.chat_agent import chat_with_agent
+            return chat_with_agent(messages, project_context)
 
         # Build context string for system prompt
         ctx_str = ""
@@ -125,22 +150,28 @@ class CopilotAgent(BaseAgent):
 
         api_messages = [
             {"role": "system", "content": SYSTEM_PROMPT + ctx_str},
-            *messages,
+            *[{"role": m["role"] if isinstance(m, dict) else m.role,
+               "content": m["content"] if isinstance(m, dict) else m.content}
+              for m in messages],
         ]
 
         try:
-            # First LLM call — may return tool_call or direct message
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=api_messages,
-                tools=self._tool_schemas(),
-                tool_choice="auto",
-                temperature=0.3,
-                max_tokens=1024,
+            call_kwargs: dict = {
+                "model": MODEL,
+                "messages": api_messages,
+                "temperature": 0.3,
+                "max_tokens": 1024,
+            }
+            if self.tools:  # only pass tools if any are active
+                call_kwargs["tools"] = self._tool_schemas()
+                call_kwargs["tool_choice"] = "auto"
+
+            response = self._call_with_retry(
+                client.chat.completions.create, **call_kwargs
             )
             msg = response.choices[0].message
 
-            if msg.tool_calls:
+            if msg.tool_calls and self.tools:
                 tc = msg.tool_calls[0]
                 tool_name = tc.function.name
                 tool_args = json.loads(tc.function.arguments)
@@ -166,7 +197,8 @@ class CopilotAgent(BaseAgent):
                     "tool_call_id": tc.id,
                     "content": json.dumps(tool_result),
                 })
-                final_resp = client.chat.completions.create(
+                final_resp = self._call_with_retry(
+                    client.chat.completions.create,
                     model=MODEL,
                     messages=api_messages,
                     temperature=0.3,
@@ -181,7 +213,5 @@ class CopilotAgent(BaseAgent):
 
         except Exception as e:
             logger.error("CopilotAgent LLM call failed: %s — falling back to chat_agent", e)
-            # Graceful fallback to original chat_agent
             from app.services.chat_agent import chat_with_agent
-
             return chat_with_agent(messages, project_context)
