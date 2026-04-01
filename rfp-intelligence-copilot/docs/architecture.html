@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RFP Intelligence Copilot — System Architecture</title>
+<style>
+:root{
+  --bg:#0f1117;--surface:#1a1d27;--surface2:#22263a;
+  --border:#2e3250;--text:#e2e8f0;--muted:#94a3b8;
+  --teal:#4fd1c5;--purple:#a78bfa;--green:#68d391;
+  --yellow:#f6e05e;--blue:#63b3ed;--red:#fc8181;
+  --orange:#f6ad55;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;padding:2rem}
+h1{text-align:center;font-size:1.8rem;font-weight:700;margin-bottom:.4rem;
+   background:linear-gradient(135deg,var(--teal),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{text-align:center;color:var(--muted);margin-bottom:2.5rem;font-size:.9rem}
+.layer{border:1px solid var(--border);border-radius:12px;padding:1.2rem 1.5rem;margin-bottom:1.2rem;background:var(--surface)}
+.layer-title{font-size:.7rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;margin-bottom:1rem;display:flex;align-items:center;gap:.5rem}
+.layer-title span{display:inline-block;width:10px;height:10px;border-radius:50%}
+.chips{display:flex;flex-wrap:wrap;gap:.5rem}
+.chip{padding:.3rem .8rem;border-radius:20px;font-size:.78rem;font-weight:500;border:1px solid transparent;cursor:default;transition:transform .15s}
+.chip:hover{transform:translateY(-2px)}
+.chip.teal{background:rgba(79,209,197,.12);border-color:rgba(79,209,197,.3);color:var(--teal)}
+.chip.purple{background:rgba(167,139,250,.12);border-color:rgba(167,139,250,.3);color:var(--purple)}
+.chip.green{background:rgba(104,211,145,.12);border-color:rgba(104,211,145,.3);color:var(--green)}
+.chip.yellow{background:rgba(246,224,94,.12);border-color:rgba(246,224,94,.3);color:var(--yellow)}
+.chip.blue{background:rgba(99,179,237,.12);border-color:rgba(99,179,237,.3);color:var(--blue)}
+.chip.red{background:rgba(252,129,129,.12);border-color:rgba(252,129,129,.3);color:var(--red)}
+.chip.orange{background:rgba(246,173,85,.12);border-color:rgba(246,173,85,.3);color:var(--orange)}
+.chip.gray{background:rgba(148,163,184,.1);border-color:rgba(148,163,184,.2);color:var(--muted)}
+.flow{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;margin-top:1.5rem;padding:1rem 1.5rem;
+  background:var(--surface2);border-radius:10px;border:1px solid var(--border)}
+.flow-title{width:100%;font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:.4rem}
+.arrow{color:var(--muted);font-size:1rem}
+.legend{display:flex;gap:1.5rem;flex-wrap:wrap;justify-content:center;margin-top:2rem;font-size:.75rem;color:var(--muted)}
+.legend-item{display:flex;align-items:center;gap:.4rem}
+.legend-dot{width:10px;height:10px;border-radius:50%}
+</style>
+</head>
+<body>
+<h1>RFP Intelligence Copilot</h1>
+<p class="subtitle">Full System Architecture — 6-Layer Stack</p>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--blue)"></span>Layer 1 — Frontend (React + Vite)</div>
+  <div class="chips">
+    <span class="chip blue">React 18</span>
+    <span class="chip blue">Vite</span>
+    <span class="chip blue">Tailwind CSS</span>
+    <span class="chip green">Dashboard /dashboard</span>
+    <span class="chip green">RFP Builder /rfp/new</span>
+    <span class="chip green">Supplier Portal /supplier</span>
+    <span class="chip yellow">Analytics /analytics (stub)</span>
+    <span class="chip yellow">Settings /settings (stub)</span>
+    <span class="chip gray">Axios · React Query · Zustand</span>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--teal)"></span>Layer 2 — API Gateway (FastAPI)</div>
+  <div class="chips">
+    <span class="chip teal">POST /api/rfp/create</span>
+    <span class="chip teal">GET /api/rfp/{id}</span>
+    <span class="chip teal">POST /api/rfp/{id}/publish</span>
+    <span class="chip teal">POST /api/supplier/invite</span>
+    <span class="chip teal">POST /api/supplier/respond</span>
+    <span class="chip teal">POST /api/analysis/run</span>
+    <span class="chip teal">GET /api/analysis/{id}</span>
+    <span class="chip teal">POST /api/auth/login</span>
+    <span class="chip teal">GET /api/health</span>
+    <span class="chip gray">JWT Auth · CORS · Rate Limiting</span>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--purple)"></span>Layer 3 — Agent Orchestration</div>
+  <div class="chips">
+    <span class="chip purple">🧠 Orchestrator Agent</span>
+    <span class="chip purple">📋 RFP Drafting Agent</span>
+    <span class="chip purple">📊 Requirements Extractor</span>
+    <span class="chip purple">🏷️ Supplier Scorer</span>
+    <span class="chip purple">⚖️ Compliance Checker</span>
+    <span class="chip purple">💰 Cost Analyser</span>
+    <span class="chip purple">🔍 Risk Detector</span>
+    <span class="chip purple">📧 Comms Agent</span>
+    <span class="chip purple">📈 Analytics Agent</span>
+    <span class="chip purple">🗂️ Document Processor</span>
+    <span class="chip gray">Plan → Execute → Observe → Respond loop</span>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--green)"></span>Layer 4 — Core Services (Python)</div>
+  <div class="chips">
+    <span class="chip green">rfp_service.py</span>
+    <span class="chip green">supplier_service.py</span>
+    <span class="chip green">analysis_service.py</span>
+    <span class="chip green">document_service.py</span>
+    <span class="chip green">email_service.py</span>
+    <span class="chip green">auth_service.py</span>
+    <span class="chip green">storage_service.py</span>
+    <span class="chip green">scoring_engine.py</span>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--orange)"></span>Layer 5 — AI / LLM (NVIDIA NIM)</div>
+  <div class="chips">
+    <span class="chip orange">Nemotron-253B — Deep reasoning</span>
+    <span class="chip orange">LLaMA-3.1-70B — Fast inference</span>
+    <span class="chip gray">integrate.api.nvidia.com/v1</span>
+    <span class="chip gray">OpenAI-compatible SDK</span>
+    <span class="chip gray">Streaming · Tool calling</span>
+  </div>
+</div>
+
+<div class="layer">
+  <div class="layer-title"><span style="background:var(--red)"></span>Layer 6 — Data &amp; Storage</div>
+  <div class="chips">
+    <span class="chip red">PostgreSQL (Supabase)</span>
+    <span class="chip red">Google Cloud Storage</span>
+    <span class="chip red">Docker / HuggingFace Space</span>
+    <span class="chip red">SMTP Email</span>
+    <span class="chip gray">RLS policies · Service Role key</span>
+    <span class="chip gray">GCS bucket — asia-south1</span>
+  </div>
+</div>
+
+<div class="flow">
+  <div class="flow-title">End-to-End Request Flow</div>
+  <span class="chip blue">Buyer creates RFP</span>
+  <span class="arrow">→</span>
+  <span class="chip teal">POST /api/rfp/create</span>
+  <span class="arrow">→</span>
+  <span class="chip purple">Orchestrator</span>
+  <span class="arrow">→</span>
+  <span class="chip purple">RFP Drafting Agent</span>
+  <span class="arrow">→</span>
+  <span class="chip red">Saved to Supabase + GCS</span>
+  <span class="arrow">→</span>
+  <span class="chip teal">POST /api/supplier/invite</span>
+  <span class="arrow">→</span>
+  <span class="chip red">SMTP invite sent</span>
+  <span class="arrow">→</span>
+  <span class="chip teal">POST /api/supplier/respond</span>
+  <span class="arrow">→</span>
+  <span class="chip purple">Scorer + Compliance + Risk Agents</span>
+  <span class="arrow">→</span>
+  <span class="chip orange">Nemotron-253B analysis</span>
+  <span class="arrow">→</span>
+  <span class="chip green">Award recommendation</span>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>Exists in codebase</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--yellow)"></div>Stub / partial</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>Planned</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div>Agent layer</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>AI / LLM</div>
+</div>
+</body>
+</html>
