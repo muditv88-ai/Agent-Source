@@ -1,5 +1,5 @@
 """
-pricing_parser.py v3
+pricing_parser.py v3.1
 
 Phase 1 (AI): Parse the pricing/commercial sheet, understand its structure,
               identify buyer-defined fields vs supplier-filled fields.
@@ -20,6 +20,10 @@ v3 changes:
   - rfp_full_text now injected into LLM prompts for column context
   - LLM fallback text limit raised from 8k → 12k chars
   - Graceful handling of pharmaceutical SKU# / Drug Name / Strength combos
+
+v3.1: added parse_pricing_response as a backward-compat alias for
+      extract_pricing_from_document so that pricing_agent.py can import
+      either name without error.
 """
 import os
 import re
@@ -567,3 +571,32 @@ def extract_pricing_from_document(
         "parse_warnings":  warnings,
         "currency":        structure_info.get("currency", ""),
     }
+
+
+# ── backward-compat alias ─────────────────────────────────────────────────────
+# pricing_agent.py imports `parse_pricing_response`; this alias satisfies that
+# import without changing any existing callers of extract_pricing_from_document.
+def parse_pricing_response(file_text: str, supplier_name: str = "Supplier", **kwargs) -> dict:
+    """
+    Alias shim for pricing_agent.py compatibility.
+    Accepts a text string instead of a file path by writing to a temp file,
+    then delegates to extract_pricing_from_document.
+    """
+    import tempfile
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as tmp:
+        tmp.write(file_text)
+        tmp_path = tmp.name
+    try:
+        return extract_pricing_from_document(
+            file_path=tmp_path,
+            supplier_name=supplier_name,
+            full_text=file_text,
+            rfp_full_text=kwargs.get("rfp_full_text", ""),
+        )
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
