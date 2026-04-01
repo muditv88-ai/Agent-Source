@@ -10,20 +10,19 @@ GCS layout:
   projects/{project_id}/suppliers/{filename}
   projects/{project_id}/metadata/questions.json
   projects/{project_id}/metadata/suppliers.json
-  projects/{project_id}/metadata/feature_flags.json   [NEW v2.0]
-  projects/{project_id}/metadata/audit_log.json       [NEW v2.0]
+  projects/{project_id}/metadata/feature_flags.json
+  projects/{project_id}/metadata/audit_log.json
 
-v2.0 additions (all backward-compatible):
-  - create_project() accepts optional meta kwargs
-  - update_module_state()  / get_module_states()
-  - save_audit_log()       / load_audit_log()
-  - get_feature_flags()    / set_feature_flags()
+v3.0 additions (all backward-compatible):
+  - list_project_files()   — list RFP + supplier files stored in GCS or local
+  - get_signed_url()       — generate a time-limited GCS signed URL (or local path)
+  - delete_rfp_file()      — remove stored RFP file
 """
 import io
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -73,7 +72,7 @@ _DEFAULT_MODULE_STATES = {
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# GCS helpers (UNCHANGED from v1)
+# GCS helpers
 # ════════════════════════════════════════════════════════════════════════════
 
 def _gcs_blob(path: str):
@@ -120,18 +119,24 @@ def _gcs_delete_blob(path: str):
     if blob.exists():
         blob.delete()
 
+def _gcs_blob_metadata(gcs_path: str) -> Optional[dict]:
+    """Return size and updated timestamp for a GCS blob, or None if not found."""
+    blob = _gcs_blob(gcs_path)
+    if not blob.exists():
+        return None
+    blob.reload()
+    return {
+        "size":         blob.size,
+        "updated":      blob.updated.isoformat() if blob.updated else None,
+        "content_type": blob.content_type,
+    }
+
 
 # ════════════════════════════════════════════════════════════════════════════
-# Core project CRUD  (EXISTING — only create_project extended with **meta_kwargs)
+# Core project CRUD
 # ════════════════════════════════════════════════════════════════════════════
 
 def create_project(name: str, **meta_kwargs) -> dict:
-    """
-    Create a new project.
-    v2.0: accepts optional keyword args: category, description,
-          stakeholders, timeline, budget, currency.
-    All callers that pass only `name` continue to work unchanged.
-    """
     project_id = str(uuid.uuid4())
     meta = {
         "project_id":    project_id,
@@ -140,14 +145,12 @@ def create_project(name: str, **meta_kwargs) -> dict:
         "status":        "created",
         "rfp_filename":  None,
         "supplier_count": 0,
-        # v2.0 optional fields — all None by default
         "category":      meta_kwargs.get("category"),
         "description":   meta_kwargs.get("description"),
         "stakeholders":  meta_kwargs.get("stakeholders"),
         "timeline":      meta_kwargs.get("timeline"),
         "budget":        meta_kwargs.get("budget"),
         "currency":      meta_kwargs.get("currency"),
-        # v2.0 module states — defaults allow existing status field to coexist
         "module_states": dict(_DEFAULT_MODULE_STATES),
     }
     if _gcs_enabled:
@@ -162,7 +165,6 @@ def create_project(name: str, **meta_kwargs) -> dict:
 
 
 def get_project(project_id: str) -> Optional[dict]:
-    """UNCHANGED from v1 — returns project dict with rfp_filename + supplier_count."""
     if _gcs_enabled:
         data = _gcs_read_json(f"projects/{project_id}/project.json")
         if not data:
@@ -172,7 +174,6 @@ def get_project(project_id: str) -> Optional[dict]:
         data["rfp_filename"] = rfp_files[0] if rfp_files else None
         sup_blobs = _gcs_list_prefix(f"projects/{project_id}/suppliers/")
         data["supplier_count"] = len([b for b in sup_blobs if not b.endswith("/")])
-        # Backfill module_states for existing projects that pre-date v2.0
         data.setdefault("module_states", dict(_DEFAULT_MODULE_STATES))
         return data
     else:
@@ -187,7 +188,6 @@ def get_project(project_id: str) -> Optional[dict]:
 
 
 def list_projects() -> list:
-    """UNCHANGED from v1."""
     if _gcs_enabled:
         blobs = _gcs_list_prefix("projects/")
         project_ids = set()
@@ -215,7 +215,6 @@ def list_projects() -> list:
 
 
 def update_project_meta(project_id: str, **kwargs) -> None:
-    """UNCHANGED from v1 — already accepts arbitrary kwargs."""
     if _gcs_enabled:
         data = _gcs_read_json(f"projects/{project_id}/project.json") or {}
         data.update(kwargs)
@@ -230,12 +229,10 @@ def update_project_meta(project_id: str, **kwargs) -> None:
 
 
 def update_project_status(project_id: str, status: str) -> None:
-    """UNCHANGED from v1."""
     update_project_meta(project_id, status=status)
 
 
 def delete_project(project_id: str) -> bool:
-    """UNCHANGED from v1."""
     if _gcs_enabled:
         _gcs_delete_prefix(f"projects/{project_id}/")
         return True
@@ -249,7 +246,7 @@ def delete_project(project_id: str) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# File upload / download (UNCHANGED from v1)
+# File upload / download
 # ════════════════════════════════════════════════════════════════════════════
 
 def save_rfp_file(project_id: str, filename: str, data: bytes) -> Path:
@@ -268,12 +265,19 @@ def save_supplier_file(project_id: str, filename: str, data: bytes) -> Path:
         _gcs_upload_file(f"projects/{project_id}/suppliers/{filename}", data)
     return local_path
 
-def save_metadata(project_id: str, filename: str, data: dict) -> Path:
+def save_metadata(project_id: str, filename: str, data) -> Path:
     local_path = PROJECTS_DIR / project_id / "metadata" / filename
     local_path.parent.mkdir(parents=True, exist_ok=True)
     local_path.write_text(json.dumps(data, indent=2))
     if _gcs_enabled:
-        _gcs_write_json(f"projects/{project_id}/metadata/{filename}", data)
+        if isinstance(data, (dict, list)):
+            _gcs_write_json(f"projects/{project_id}/metadata/{filename}", data)
+        else:
+            _gcs_upload_file(
+                f"projects/{project_id}/metadata/{filename}",
+                json.dumps(data, indent=2).encode(),
+                content_type="application/json"
+            )
     return local_path
 
 def load_metadata(project_id: str, filename: str) -> Optional[dict]:
@@ -333,8 +337,136 @@ def delete_supplier_file(project_id: str, filename: str) -> bool:
     return deleted
 
 
+def delete_rfp_file(project_id: str) -> bool:
+    """Remove the RFP file for a project (local + GCS)."""
+    local = get_rfp_path(project_id)
+    deleted = False
+    if local and local.exists():
+        local.unlink()
+        deleted = True
+    if _gcs_enabled:
+        blobs = _gcs_list_prefix(f"projects/{project_id}/rfp/")
+        for b in blobs:
+            if not b.endswith("/"):
+                _gcs_delete_blob(b)
+                deleted = True
+    return deleted
+
+
 # ════════════════════════════════════════════════════════════════════════════
-# Path helpers (UNCHANGED from v1)
+# NEW v3.0 — File listing & signed URLs
+# ════════════════════════════════════════════════════════════════════════════
+
+def list_project_files(project_id: str) -> dict:
+    """
+    Return a structured dict of all files stored for this project.
+
+    Returns:
+        {
+          "rfp":       [{"filename": ..., "size": ..., "uploaded_at": ..., "storage": "gcs"|"local"}],
+          "suppliers": [{"filename": ..., "size": ..., "uploaded_at": ..., "storage": ...,
+                          "display_name": ...}],
+          "storage_backend": "gcs" | "local"
+        }
+    """
+    supplier_meta = load_metadata(project_id, "suppliers.json") or {}
+    # Build reverse map: filename -> display_name
+    display_names: dict[str, str] = {}
+    for path_key, dname in supplier_meta.items():
+        display_names[Path(path_key).name] = dname
+
+    if _gcs_enabled:
+        rfp_blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/rfp/") if not b.endswith("/")]
+        sup_blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/suppliers/") if not b.endswith("/")]
+
+        rfp_files = []
+        for gcs_path in rfp_blobs:
+            fname = gcs_path.split("/")[-1]
+            bmeta = _gcs_blob_metadata(gcs_path) or {}
+            rfp_files.append({
+                "filename":    fname,
+                "size":        bmeta.get("size"),
+                "uploaded_at": bmeta.get("updated"),
+                "gcs_path":    gcs_path,
+                "storage":     "gcs",
+            })
+
+        sup_files = []
+        for gcs_path in sup_blobs:
+            fname = gcs_path.split("/")[-1]
+            bmeta = _gcs_blob_metadata(gcs_path) or {}
+            sup_files.append({
+                "filename":     fname,
+                "display_name": display_names.get(fname, fname),
+                "size":         bmeta.get("size"),
+                "uploaded_at":  bmeta.get("updated"),
+                "gcs_path":     gcs_path,
+                "storage":      "gcs",
+            })
+
+        return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "gcs"}
+    else:
+        rfp_dir = PROJECTS_DIR / project_id / "rfp"
+        sup_dir = PROJECTS_DIR / project_id / "suppliers"
+
+        rfp_files = []
+        if rfp_dir.exists():
+            for f in rfp_dir.iterdir():
+                if f.is_file():
+                    st = f.stat()
+                    rfp_files.append({
+                        "filename":    f.name,
+                        "size":        st.st_size,
+                        "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                        "storage":     "local",
+                    })
+
+        sup_files = []
+        if sup_dir.exists():
+            for f in sup_dir.iterdir():
+                if f.is_file():
+                    st = f.stat()
+                    sup_files.append({
+                        "filename":     f.name,
+                        "display_name": display_names.get(f.name, f.name),
+                        "size":         st.st_size,
+                        "uploaded_at":  datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                        "storage":      "local",
+                    })
+
+        return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "local"}
+
+
+def get_signed_url(project_id: str, role: str, filename: str, expiry_minutes: int = 60) -> Optional[str]:
+    """
+    Generate a time-limited download URL for a stored project file.
+
+    role: "rfp" | "supplier"
+    Returns:
+      - GCS signed URL (valid for expiry_minutes) when GCS is active
+      - None when using local storage (caller should serve file directly)
+    """
+    if role not in ("rfp", "suppliers"):
+        role = "suppliers" if role == "supplier" else role
+    gcs_path = f"projects/{project_id}/{role}/{filename}"
+
+    if _gcs_enabled:
+        blob = _gcs_blob(gcs_path)
+        if not blob.exists():
+            return None
+        url = blob.generate_signed_url(
+            expiration=timedelta(minutes=expiry_minutes),
+            method="GET",
+            version="v4",
+        )
+        return url
+    else:
+        # For local storage, return a relative API path the caller can proxy
+        return None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Path helpers
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_rfp_path(project_id: str) -> Optional[Path]:
@@ -365,14 +497,10 @@ def is_gcs_enabled() -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v2.0 — Module state management
+# Module state management
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_module_states(project_id: str) -> dict:
-    """
-    Return module_states dict for a project.
-    Backfills defaults for projects created before v2.0.
-    """
     project = get_project(project_id)
     if not project:
         return dict(_DEFAULT_MODULE_STATES)
@@ -380,18 +508,12 @@ def get_module_states(project_id: str) -> dict:
 
 
 def update_module_state(project_id: str, module: str, state: str) -> dict:
-    """
-    Set state for one module.  module = 'rfp' | 'technical' | 'pricing'
-    state = 'pending' | 'active' | 'complete' | 'error'
-    Returns updated module_states dict.
-    """
     valid_modules = {"rfp", "technical", "pricing"}
     valid_states  = {"pending", "active", "complete", "error"}
     if module not in valid_modules:
         raise ValueError(f"Invalid module '{module}'. Must be one of {valid_modules}")
     if state not in valid_states:
         raise ValueError(f"Invalid state '{state}'. Must be one of {valid_states}")
-
     current = get_module_states(project_id)
     current[f"{module}_state"] = state
     update_project_meta(project_id, module_states=current)
@@ -399,30 +521,20 @@ def update_module_state(project_id: str, module: str, state: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v2.0 — Feature flags
+# Feature flags
 # ════════════════════════════════════════════════════════════════════════════
 
 def get_feature_flags(project_id: str) -> dict:
-    """
-    Load feature flags for project. Returns defaults if not yet set.
-    Safe to call on any project, including those pre-dating v2.0.
-    """
     stored = load_metadata(project_id, "feature_flags.json")
     if stored is None:
         return dict(_DEFAULT_FEATURE_FLAGS)
-    # Merge with defaults so new flags added in future releases have values
     merged = dict(_DEFAULT_FEATURE_FLAGS)
     merged.update(stored)
     return merged
 
 
 def set_feature_flags(project_id: str, updates: dict) -> dict:
-    """
-    Merge updates into existing feature flags and persist.
-    Only keys present in updates are changed.
-    """
     current = get_feature_flags(project_id)
-    # Only allow known flag keys to prevent arbitrary writes
     for key, val in updates.items():
         if key in _DEFAULT_FEATURE_FLAGS:
             current[key] = bool(val)
@@ -431,31 +543,20 @@ def set_feature_flags(project_id: str, updates: dict) -> dict:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v2.0 — Audit log
+# Audit log
 # ════════════════════════════════════════════════════════════════════════════
 
 def save_audit_log(project_id: str, entry: dict) -> None:
-    """
-    Append a single audit entry to audit_log.json.
-    Creates the file if it does not exist.
-    Thread-safety note: for high concurrency, use a queue; for current
-    single-worker deployment, file append is safe.
-    """
     existing = load_metadata(project_id, "audit_log.json") or []
     if not isinstance(existing, list):
         existing = []
     existing.append(entry)
-    # Keep last 500 entries to prevent unbounded growth
     if len(existing) > 500:
         existing = existing[-500:]
     save_metadata(project_id, "audit_log.json", existing)
 
 
 def load_audit_log(project_id: str, limit: int = 50) -> list:
-    """
-    Return the most recent `limit` audit entries for a project.
-    Returns [] if no log exists yet.
-    """
     log = load_metadata(project_id, "audit_log.json") or []
     if not isinstance(log, list):
         return []

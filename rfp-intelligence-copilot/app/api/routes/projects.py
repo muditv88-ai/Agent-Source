@@ -1,19 +1,15 @@
 """
-projects.py  v2.1
+projects.py  v3.0
 
-ALL EXISTING ENDPOINTS ARE PRESERVED EXACTLY.
-New endpoints appended at the bottom.
+ALL EXISTING ENDPOINTS PRESERVED EXACTLY.
 
-New in v2.1:
-  PATCH  /projects/{id}/supplier/{filename}/name  — rename a supplier display name
-
-New in v2.0:
-  PATCH  /projects/{id}/meta              — update optional project metadata
-  GET    /projects/{id}/module-states     — read module completion states
-  PATCH  /projects/{id}/module-states     — update one module state
-  GET    /projects/{id}/audit-log         — read chatbot/action audit trail
-  GET    /projects/{id}/feature-flags     — read feature flags
-  PATCH  /projects/{id}/feature-flags     — toggle feature flags
+New in v3.0:
+  GET    /projects/{id}/files                          — list stored RFP + supplier files
+  GET    /projects/{id}/files/{role}/{filename}/url    — get signed download URL (GCS) or
+                                                          stream file (local)
+  DELETE /projects/{id}/rfp                            — remove stored RFP file
+  POST   /projects/{id}/rerun-analysis                 — trigger analysis using stored files
+                                                          (no re-upload required)
 """
 import json
 import traceback
@@ -23,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.services.project_store import (
@@ -32,7 +29,8 @@ from app.services.project_store import (
     update_project_status, update_project_meta,
     save_rfp_file, save_supplier_file, save_metadata, load_metadata,
     ensure_rfp_local, ensure_suppliers_local,
-    delete_supplier_file, is_gcs_enabled,
+    delete_supplier_file, delete_rfp_file, is_gcs_enabled,
+    list_project_files, get_signed_url,
     PROJECTS_DIR,
     # v2.0
     get_module_states, update_module_state,
@@ -161,8 +159,6 @@ def _do_parse_project(project_id: str) -> dict:
         raise FileNotFoundError("No RFP file found in project")
     parsed_doc = parse_document(str(rfp_path))
     full_text  = parsed_doc.get("full_text", "")
-    # Pass the project metadata dir as cache_dir so repeated parses of the
-    # same file content are served instantly from disk.
     cache_dir  = str(PROJECTS_DIR / project_id / "metadata")
     extracted  = extract_rfp_questions(full_text, cache_dir=cache_dir)
     raw_qs     = extracted.get("questions", [])
@@ -222,7 +218,113 @@ async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v2.1 ENDPOINTS
+# NEW v3.0 ENDPOINTS
+# ════════════════════════════════════════════════════════════════════════════
+
+@router.get("/{project_id}/files")
+async def list_stored_files(project_id: str):
+    """
+    List all files stored for this project (RFP + supplier responses).
+    Works with both GCS and local storage. Frontend uses this to show
+    what is already uploaded and allow re-running analysis without re-upload.
+    """
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return list_project_files(project_id)
+
+
+@router.get("/{project_id}/files/{role}/{filename}/url")
+async def get_file_download_url(project_id: str, role: str, filename: str, expiry: int = 60):
+    """
+    Get a download URL for a stored project file.
+
+    - role: "rfp" or "supplier"
+    - GCS: returns a signed URL valid for `expiry` minutes
+    - Local: streams the file directly via FileResponse
+    """
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if role not in ("rfp", "supplier"):
+        raise HTTPException(status_code=400, detail="role must be 'rfp' or 'supplier'")
+
+    # Normalise role to directory name
+    folder = "rfp" if role == "rfp" else "suppliers"
+
+    if is_gcs_enabled():
+        signed = get_signed_url(project_id, folder, filename, expiry_minutes=expiry)
+        if not signed:
+            raise HTTPException(status_code=404, detail="File not found in GCS")
+        return {"url": signed, "expires_in_minutes": expiry, "storage": "gcs"}
+    else:
+        local_path = PROJECTS_DIR / project_id / folder / filename
+        if not local_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(
+            path=str(local_path),
+            filename=filename,
+            media_type="application/octet-stream",
+        )
+
+
+@router.delete("/{project_id}/rfp")
+async def remove_project_rfp(project_id: str):
+    """Delete the stored RFP file for a project (GCS + local)."""
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    deleted = delete_rfp_file(project_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No RFP file found")
+    update_project_meta(project_id, rfp_filename=None, status="created")
+    update_module_state(project_id, "rfp", "pending")
+    return {"project_id": project_id, "deleted": True}
+
+
+@router.post("/{project_id}/rerun-analysis")
+async def rerun_analysis_from_stored_files(project_id: str, background_tasks: BackgroundTasks):
+    """
+    Trigger technical analysis using files already stored in GCS/local —
+    no re-upload needed. Checks that both RFP and at least one supplier
+    file exist before starting the job.
+    """
+    from app.api.routes.analysis import _run_analysis_job
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Verify files exist (pulls from GCS to local cache if needed)
+    rfp_path = ensure_rfp_local(project_id)
+    if not rfp_path:
+        raise HTTPException(
+            status_code=400,
+            detail="No RFP file stored for this project. Please upload the RFP first."
+        )
+
+    supplier_paths = ensure_suppliers_local(project_id)
+    if not supplier_paths:
+        raise HTTPException(
+            status_code=400,
+            detail="No supplier files stored for this project. Please upload at least one supplier response."
+        )
+
+    update_module_state(project_id, "technical", "active")
+    job_id = job_store.create()
+    background_tasks.add_task(_run_analysis_job, project_id, job_id, project_id)
+    return {
+        "job_id":           job_id,
+        "status":           JobStatus.PENDING,
+        "rfp_file":         rfp_path.name,
+        "supplier_count":   len(supplier_paths),
+        "message":          "Analysis started using stored files — no re-upload required",
+    }
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v2.1 ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 class SupplierRenameRequest(BaseModel):
@@ -231,17 +333,12 @@ class SupplierRenameRequest(BaseModel):
 
 @router.patch("/{project_id}/supplier/{filename}/name")
 async def rename_project_supplier(project_id: str, filename: str, body: SupplierRenameRequest):
-    """
-    Update the display name of an already-uploaded supplier file.
-    Writes directly into suppliers.json without requiring a re-upload.
-    """
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     new_name = body.new_name.strip()
     if not new_name:
         raise HTTPException(status_code=400, detail="new_name must not be empty")
-
     meta = load_metadata(project_id, "suppliers.json") or {}
     matched = [k for k in meta if Path(k).name == filename or k == filename]
     if not matched:
@@ -253,7 +350,7 @@ async def rename_project_supplier(project_id: str, filename: str, body: Supplier
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v2.0 ENDPOINTS
+# v2.0 ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.patch("/{project_id}/meta")
@@ -273,10 +370,7 @@ async def get_project_module_states(project_id: str):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return {
-        "project_id":    project_id,
-        "module_states": get_module_states(project_id),
-    }
+    return {"project_id": project_id, "module_states": get_module_states(project_id)}
 
 
 @router.patch("/{project_id}/module-states")
@@ -305,10 +399,7 @@ async def get_project_feature_flags(project_id: str):
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return {
-        "project_id":   project_id,
-        "feature_flags": get_feature_flags(project_id),
-    }
+    return {"project_id": project_id, "feature_flags": get_feature_flags(project_id)}
 
 
 @router.patch("/{project_id}/feature-flags")
