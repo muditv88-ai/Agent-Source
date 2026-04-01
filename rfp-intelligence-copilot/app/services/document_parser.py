@@ -1,10 +1,42 @@
 """Universal document parser - handles xlsx, xls, csv, pdf, docx"""
+import io
+import tempfile
+import os
 import pandas as pd
 import pdfplumber
 import docx
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Union
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public convenience function used by rfp.py routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_text(file_bytes: bytes, filename: str) -> str:
+    """
+    Accept raw bytes + original filename, write to a temp file,
+    parse it, and return the full_text string.
+
+    This is the primary API consumed by api/routes/rfp.py.
+    """
+    suffix = Path(filename).suffix.lower() or ".bin"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        result = parse_document(tmp_path)
+        return result.get("full_text", "")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Core parser — accepts a file path, returns structured dict
+# ─────────────────────────────────────────────────────────────────────────────
 
 def parse_document(file_path: str) -> Dict[str, Any]:
     """Parse any supported document type into a unified text/table structure."""
@@ -23,6 +55,10 @@ def parse_document(file_path: str) -> Dict[str, Any]:
         raise ValueError(f"Unsupported file type: {suffix}")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Private parsers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _parse_excel(file_path: str) -> Dict[str, Any]:
     xls = pd.ExcelFile(file_path)
     sheets = {}
@@ -31,7 +67,6 @@ def _parse_excel(file_path: str) -> Dict[str, Any]:
         df = pd.read_excel(file_path, sheet_name=sheet_name)
         df = df.fillna("")
         sheets[sheet_name] = df.to_dict(orient="records")
-        # Use CSV format — denser and cleaner for the LLM than to_string()
         text = f"=== Sheet: {sheet_name} ===\n"
         text += df.to_csv(index=False)
         full_text_parts.append(text)
