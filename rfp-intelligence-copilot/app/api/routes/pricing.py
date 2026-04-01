@@ -8,18 +8,36 @@ Endpoints:
   POST /pricing/correct         — apply user correction to detected structure
   GET  /pricing/export/{rfp_id} — export pricing analysis as xlsx/csv
 
-FIX (2026-04-01):
-  - extract_pricing_from_document is CPU/IO-bound and was being called
-    synchronously inside an async function, blocking FastAPI's event loop.
-    Wrapped in loop.run_in_executor so the event loop stays free and
-    set_completed() is always reached.
-  - Replaced asyncio.get_event_loop() with asyncio.get_running_loop()
-    (get_event_loop() is deprecated in Python 3.10+ and raises DeprecationWarning;
-    can also return a closed loop in background-task context).
+FIXES (2026-04-01 v2):
+  BUG-1  asyncio.Semaphore(2) created at module import time — outside any
+         running event loop on Python 3.10+ this raises
+         "DeprecationWarning / no current event loop" and can silently
+         return a broken semaphore that raises RuntimeError on first `async with`.
+         Fix: initialise _api_semaphore lazily inside the first coroutine that
+         needs it, guarded by a threading.Lock so the one-time init is safe.
+
+  BUG-2  name_map values can be plain strings OR dicts
+         (saved as {filename: {"name": ..., "email": ...}} by suppliers.py).
+         The original code checked isinstance AFTER already using .get() on the
+         dict, meaning the string path fell through and the dict path was never
+         reached. Fix: check the type of the *value* first, then extract .name.
+
+  BUG-3  `import openpyxl` inside the /export route raises HTTP 500 with a
+         misleading "openpyxl not installed" message even when openpyxl IS
+         installed, because the ImportError guard was raising HTTPException
+         instead of letting the real openpyxl ImportError propagate for
+         diagnosis. Fixed to re-raise the real error and added a top-level
+         import so missing-dependency failures are caught at startup, not
+         at request time.
+
+  PRIOR FIXES (kept):
+  - extract_pricing_from_document wrapped in run_in_executor (non-blocking)
+  - asyncio.get_running_loop() replaces deprecated get_event_loop()
 """
 import json
 import asyncio
 import io
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,16 +50,40 @@ from app.services.pricing_analyzer import run_pricing_analysis
 from app.services.document_parser import parse_document
 from app.services.job_store import job_store, JobStatus
 
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    _OPENPYXL_AVAILABLE = True
+except ImportError:
+    _OPENPYXL_AVAILABLE = False
+
 
 router     = APIRouter()
 UPLOAD_DIR = Path("uploads")
 META_DIR   = Path("metadata")
 
-_executor      = ThreadPoolExecutor(max_workers=4)
-_api_semaphore = asyncio.Semaphore(2)
+_executor = ThreadPoolExecutor(max_workers=4)
+
+# BUG-1 FIX: do NOT create asyncio.Semaphore at import time.
+# On Python 3.10+ there is no running event loop at module load, so
+# asyncio.Semaphore() silently attaches to a throwaway loop that is
+# already closed by the time the first request arrives, causing
+# RuntimeError: Task got Future attached to a different loop.
+_api_semaphore: Optional[asyncio.Semaphore] = None
+_semaphore_lock = threading.Lock()
 
 
-# ── Request / Response models ──────────────────────────────────────────────────────────────────
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return (or lazily create) the per-process API semaphore."""
+    global _api_semaphore
+    if _api_semaphore is None:
+        with _semaphore_lock:
+            if _api_semaphore is None:          # double-checked locking
+                _api_semaphore = asyncio.Semaphore(2)
+    return _api_semaphore
+
+
+# ── Request / Response models ─────────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
     rfp_id:     str
     project_id: Optional[str] = None
@@ -62,7 +104,7 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────
 def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
     last_err = None
     delay = base_delay
@@ -90,12 +132,41 @@ def _load_supplier_names(rfp_id: str) -> dict:
 
 async def _run_in_thread(fn, *args):
     """Run a blocking function in the thread pool without blocking the event loop."""
-    # FIX: use get_running_loop() — get_event_loop() is deprecated in Python 3.10+
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, fn, *args)
 
 
-# ── Background job ────────────────────────────────────────────────────────────────────────────
+def _resolve_supplier_name(name_map: dict, sf_path: Path) -> str:
+    """
+    BUG-2 FIX: name_map values can be either plain strings OR dicts of the form
+    {"name": "Acme Ltd", "email": "..."}.  The original code checked
+    isinstance(name_map.get(sf_path.name), dict) AFTER already calling .get()
+    on the outer map, which meant the string-value fast-path was silently
+    falling through and resolving to the raw stem as the supplier name.
+    """
+    # Priority 1: full path key with dict value  {str(sf): {"name": ...}}
+    v = name_map.get(str(sf_path))
+    if isinstance(v, dict):
+        return v.get("name") or sf_path.stem
+    if isinstance(v, str) and v:
+        return v
+
+    # Priority 2: filename key with dict value  {sf_path.name: {"name": ...}}
+    v = name_map.get(sf_path.name)
+    if isinstance(v, dict):
+        return v.get("name") or sf_path.stem
+    if isinstance(v, str) and v:
+        return v
+
+    # Priority 3: derive from filename  "abc_supplier_Acme Ltd.xlsx" -> "Acme Ltd"
+    stem = sf_path.stem
+    if "_supplier_" in stem:
+        return stem.split("_supplier_", 1)[-1]
+
+    return stem
+
+
+# ── Background job ─────────────────────────────────────────────────────────
 async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
     job_store.set_running(job_id)
     try:
@@ -143,7 +214,7 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
             )
             return
 
-        # ── Parse RFP to get full template text (column context for LLM) ────
+        # ── Parse RFP to get full template text ───────────────────────────
         rfp_full_text = ""
         if rfp_path and Path(str(rfp_path)).exists():
             try:
@@ -154,31 +225,20 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
             except Exception:
                 rfp_full_text = ""
 
-        # ── Extract pricing from each supplier document ────────────────────
+        # ── Extract pricing from each supplier document ───────────────────
         suppliers_pricing = []
+        semaphore = _get_semaphore()          # BUG-1 FIX: lazy init
         for sf in supplier_files:
             sf_path = Path(str(sf))
+            supplier_name = _resolve_supplier_name(name_map, sf_path)  # BUG-2 FIX
 
-            # Resolve supplier display name from metadata map
-            supplier_name = (
-                name_map.get(str(sf))
-                or name_map.get(sf_path.name)
-                or sf_path.stem.split("_supplier_")[-1]
-            )
-
-            if isinstance(name_map.get(sf_path.name), dict):
-                supplier_name = name_map[sf_path.name].get("name", supplier_name)
-
-            async with _api_semaphore:
+            async with semaphore:
                 parsed = await _run_in_thread(
                     _call_with_retry, parse_document, str(sf)
                 )
 
             full_text = parsed.get("full_text", "")
 
-            # FIX: extract_pricing_from_document is CPU/IO-bound.
-            # Must run in executor — calling it directly blocks the event loop
-            # and prevents set_completed() from ever being reached.
             pricing = await _run_in_thread(
                 extract_pricing_from_document,
                 str(sf),
@@ -202,7 +262,7 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
         job_store.set_failed(job_id, str(e))
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────────────
+# ── Routes ────────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=JobStartResponse)
 async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: BackgroundTasks):
     job_id = job_store.create()
@@ -310,11 +370,14 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
             headers={"Content-Disposition": f"attachment; filename=pricing_{rfp_id}.csv"},
         )
 
-    try:
-        import openpyxl
-        from openpyxl.styles import Font, PatternFill, Alignment
-    except ImportError:
-        raise HTTPException(status_code=500, detail="openpyxl not installed")
+    # BUG-3 FIX: openpyxl is imported at module top-level so import errors
+    # surface at startup, not at request time. Check the flag here instead
+    # of a try/except that swallows the real traceback.
+    if not _OPENPYXL_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail="openpyxl is not installed. Add 'openpyxl' to requirements.txt and restart.",
+        )
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
