@@ -1,0 +1,41 @@
+# docker-compose.gcs.yml
+# Production compose file — uses Google Cloud Storage for persistent data.
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in all values.
+#   2. Place your GCP service account JSON key at ./secrets/gcp-sa-key.json
+#      (the path referenced by GOOGLE_APPLICATION_CREDENTIALS inside the container).
+#   3. docker compose -f docker-compose.gcs.yml up -d
+#
+# The container mounts ./secrets/ as read-only into /secrets/.
+# No data is written to the local filesystem beyond /tmp — GCS is the source of truth.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rfp-copilot:latest
+    container_name: rfp_copilot_api
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    environment:
+      # GCS backend — override any local default
+      STORAGE_BACKEND: gcs
+      DATA_DIR: /tmp/rfp-cache  # ephemeral local cache (GCS is source of truth)
+    volumes:
+      # Mount your GCP service account key read-only into the container
+      - ./secrets:/secrets:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7860/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+# No named volumes needed — GCS handles all persistence.
+# The /tmp/rfp-cache inside the container is used only as a warm cache
+# for files fetched from GCS during a request; it is intentionally ephemeral.
