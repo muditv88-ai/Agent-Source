@@ -38,6 +38,7 @@ from app.services.project_store import (
     load_audit_log,
 )
 from app.services.job_store import job_store, JobStatus
+from app.api.routes import analysis as _analysis_module
 from app.services.document_parser import parse_document
 from app.services.rfp_extractor import extract_rfp_questions
 from app.models.schemas import (
@@ -212,7 +213,7 @@ async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     job_id = job_store.create()
-    background_tasks.add_task(_run_analysis_job, project_id, job_id, project_id)
+    background_tasks.add_task(_analysis_module._run_analysis_job, project_id, job_id, project_id)
     return {"job_id": job_id, "status": JobStatus.PENDING}
 
 
@@ -289,7 +290,6 @@ async def rerun_analysis_from_stored_files(project_id: str, background_tasks: Ba
     no re-upload needed. Checks that both RFP and at least one supplier
     file exist before starting the job.
     """
-    from app.api.routes.analysis import _run_analysis_job
 
     project = get_project(project_id)
     if not project:
@@ -312,7 +312,7 @@ async def rerun_analysis_from_stored_files(project_id: str, background_tasks: Ba
 
     update_module_state(project_id, "technical", "active")
     job_id = job_store.create()
-    background_tasks.add_task(_run_analysis_job, project_id, job_id, project_id)
+    background_tasks.add_task(_analysis_module._run_analysis_job, project_id, job_id, project_id)
     return {
         "job_id":           job_id,
         "status":           JobStatus.PENDING,

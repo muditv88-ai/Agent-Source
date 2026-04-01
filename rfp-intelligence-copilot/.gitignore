@@ -43,3 +43,21 @@ alembic/versions/__pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+
+# Project data (local dev cache — use GCS in production)
+projects/
+metadata/
+
+# Secrets
+secrets/
+gcs-key.json
+
+# Runtime user store
+users.json
+
+# ngrok binary
+ngrok-v3-stable-linux-amd64.tgz
+
+# Misc
+y/
