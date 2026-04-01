@@ -7,10 +7,27 @@ import concurrent.futures
 from openai import OpenAI
 from typing import Dict, Any, List
 
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY"),
-)
+# ── Lazy client initialisation ────────────────────────────────────────────────
+# Do NOT instantiate OpenAI at module level.  The key may not be present when
+# the module is first imported (e.g. during uvicorn startup), which would raise
+# OpenAIError and crash the whole process.  Instead, create the client on first
+# use via _get_client().
+_client: OpenAI | None = None
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("NVIDIA_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "NVIDIA_API_KEY environment variable is not set. "
+                "Export it before starting the server."
+            )
+        _client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key,
+        )
+    return _client
 
 MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
 CHUNK_MAX_CHARS = 8000    # smaller chunks = faster per-call latency
@@ -105,7 +122,7 @@ def _extract_from_chunk(chunk_text: str, chunk_index: int) -> Dict:
         f"{SYSTEM_PROMPT}\n\n"
         f"Extract all evaluation questions from this RFP section:\n\n{chunk_text}"
     )
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=MODEL,
         messages=[
             {"role": "system", "content": "detailed thinking off"},
