@@ -1,5 +1,5 @@
 """
-pricing_analyzer.py v2
+pricing_analyzer.py v2.1
 
 All maths done in pure Python (no LLM).
 
@@ -15,6 +15,9 @@ Scenarios:
 Data contract:
   Input : list of extract_pricing_from_document() dicts
   Output: dict ready to be JSON-serialised and stored
+
+v2.1: added analyze_pricing as an alias for run_pricing_analysis so that
+      pricing_agent.py can import either name without error.
 """
 from itertools import combinations
 from typing import Any
@@ -329,12 +332,6 @@ def scenario_market_basket(cost_model: dict, n: int) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Scenario 5 — Custom (built at runtime by scenario_engine)
-# ═══════════════════════════════════════════════════════════════════════════════
-# (see scenario_engine.py)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # Award recommendation
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -397,7 +394,6 @@ def build_award_recommendation(
             "suppliers":   b["suppliers"],
         })
 
-    # Remove zero-total candidates (no data)
     candidates = [c for c in candidates if c["total"] > 0]
     candidates.sort(key=lambda x: x["total"])
 
@@ -406,8 +402,6 @@ def build_award_recommendation(
         c["saving_vs_worst"]     = round(max_total - c["total"], 2)
         c["saving_vs_worst_pct"] = round((max_total - c["total"]) / max_total * 100, 1) if max_total else 0
 
-    # Recommend lowest-cost unless it's Very High complexity;
-    # then prefer Medium if cost difference < 3%
     recommended = candidates[0] if candidates else {}
     if recommended.get("complexity") == "Very High":
         med = [c for c in candidates if c["complexity"] in ("Low", "Medium")]
@@ -454,7 +448,7 @@ def run_pricing_analysis(suppliers_pricing: list[dict]) -> dict:
     return {
         "suppliers":                [sp["supplier_name"] for sp in suppliers_pricing],
         "cost_model":               cost_model,
-        "total_costs":              total_costs,          # L1/L2/L3
+        "total_costs":              total_costs,
         "best_of_best":             bob,
         "optimised_award_sku":      opt_sku,
         "optimised_award_category": opt_cat,
@@ -462,3 +456,9 @@ def run_pricing_analysis(suppliers_pricing: list[dict]) -> dict:
         "market_basket_3":          basket_3,
         "award_recommendation":     award_rec,
     }
+
+
+# ─── backward-compat alias ────────────────────────────────────────────────────
+# pricing_agent.py imports `analyze_pricing`; this alias satisfies that import
+# without changing any existing callers of run_pricing_analysis.
+analyze_pricing = run_pricing_analysis
