@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RFP Intelligence Copilot — System Architecture</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface2: #21262d;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --teal: #2dd4bf;
+    --teal2: #0d9488;
+    --purple: #a78bfa;
+    --blue: #60a5fa;
+    --green: #4ade80;
+    --yellow: #fbbf24;
+    --orange: #fb923c;
+    --red: #f87171;
+    --pink: #f472b6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.5; padding: 32px 24px; }
+  h1 { font-size: 22px; font-weight: 700; color: var(--teal); margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 32px; }
+  .layer { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 20px; overflow: hidden; }
+  .layer-header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: var(--surface2); border-bottom: 1px solid var(--border); }
+  .layer-num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 12px; flex-shrink: 0; }
+  .layer-title { font-weight: 600; font-size: 15px; }
+  .layer-desc { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .layer-body { padding: 18px 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; min-width: 160px; flex: 1; }
+  .card-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .card-sub { color: var(--muted); font-size: 11px; }
+  .badge { display: inline-block; border-radius: 4px; padding: 1px 7px; font-size: 10px; font-weight: 600; margin-top: 6px; }
+  .badge-exists { background: #1a3a2a; color: var(--green); border: 1px solid #2d6a45; }
+  .badge-stub { background: #3a2e10; color: var(--yellow); border: 1px solid #6a5020; }
+  .badge-planned { background: #1a2a3a; color: var(--blue); border: 1px solid #2d4a6a; }
+  .flow { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .flow h2 { font-size: 14px; font-weight: 600; color: var(--purple); margin-bottom: 14px; }
+  .flow-steps { display: flex; flex-wrap: wrap; gap: 0; align-items: center; }
+  .flow-step { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-size: 12px; }
+  .flow-step strong { display: block; font-size: 13px; color: var(--teal); margin-bottom: 2px; }
+  .arrow { color: var(--muted); padding: 0 6px; font-size: 18px; }
+  .legend { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .env-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  .env-item { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; font-family: monospace; font-size: 11px; }
+  .env-key { color: var(--teal); }
+  .env-val { color: var(--muted); }
+  @media (max-width: 600px) { .layer-desc { display: none; } .card { min-width: 130px; } }
+</style>
+</head>
+<body>
+
+<h1>⚙️ RFP Intelligence Copilot</h1>
+<p class="subtitle">System Architecture Map · Full Tech Stack Reference · Generated April 2026</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4ade80"></div> Exists in codebase</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#fbbf24"></div> Stub / partial</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#60a5fa"></div> Planned / new</div>
+</div>
+
+<!-- LAYER 1: FRONTEND -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#1a2a3a;color:#60a5fa">1</div>
+    <span class="layer-title" style="color:#60a5fa">Frontend</span>
+    <span class="layer-desc">React 18 · Vite · Tailwind CSS · TypeScript</span>
+  </div>
+  <div class="layer-body">
+    <div class="card">
+      <div class="card-title">Dashboard</div>
+      <div class="card-sub">RFP list, status overview, analytics</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">RFP Creator</div>
+      <div class="card-sub">Upload PDF / form builder</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Supplier Portal</div>
+      <div class="card-sub">Invite flow, response submission</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Analysis View</div>
+      <div class="card-sub">Scoring, comparison, award decision</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Auth Pages</div>
+      <div class="card-sub">Login / Register via Supabase</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+  </div>
+</div>
+
+<!-- LAYER 2: API GATEWAY -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#2a1a3a;color:#a78bfa">2</div>
+    <span class="layer-title" style="color:#a78bfa">API Gateway</span>
+    <span class="layer-desc">FastAPI · Python 3.11 · Uvicorn · Pydantic v2</span>
+  </div>
+  <div class="layer-body">
+    <div class="card">
+      <div class="card-title">POST /rfp/upload</div>
+      <div class="card-sub">Ingest PDF → GCS, parse metadata</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">POST /rfp/analyze</div>
+      <div class="card-sub">Trigger agent orchestration loop</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">POST /supplier/invite</div>
+      <div class="card-sub">Send invite email via SMTP</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">POST /response/submit</div>
+      <div class="card-sub">Receive supplier bid document</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">GET /analysis/{id}</div>
+      <div class="card-sub">Fetch scored results & recommendation</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">WS /agent/stream</div>
+      <div class="card-sub">Real-time agent thought streaming</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+  </div>
+</div>
+
+<!-- LAYER 3: AGENT ORCHESTRATION -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#1a3a2a;color:#2dd4bf">3</div>
+    <span class="layer-title" style="color:#2dd4bf">Agent Orchestration</span>
+    <span class="layer-desc">Plan → Execute → Observe → Respond loop · app/agents/</span>
+  </div>
+  <div class="layer-body">
+    <div class="card" style="flex-basis:100%;background:var(--surface2);border-color:#2dd4bf40">
+      <div class="card-title" style="color:#2dd4bf">Orchestrator — agent_loop.py</div>
+      <div class="card-sub">Routes tasks to specialist agents · manages state machine · retries on failure</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">🔍 RFP Parser</div>
+      <div class="card-sub">Extract clauses, requirements, deadlines</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">📋 Requirements Agent</div>
+      <div class="card-sub">Structured extraction of must-haves</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">🏷️ Scoring Agent</div>
+      <div class="card-sub">Weighted criteria scoring per bid</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">📊 Comparison Agent</div>
+      <div class="card-sub">Side-by-side supplier analysis</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">⚖️ Compliance Agent</div>
+      <div class="card-sub">Regulatory & T&C flag checks</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">💰 Cost Analyst</div>
+      <div class="card-sub">TCO breakdown, price normalisation</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">✉️ Comms Agent</div>
+      <div class="card-sub">Draft supplier emails & Q&A responses</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">🏆 Award Agent</div>
+      <div class="card-sub">Final recommendation with rationale</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">📝 Report Agent</div>
+      <div class="card-sub">Generate executive summary PDF</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+    <div class="card">
+      <div class="card-title">🛡️ Risk Agent</div>
+      <div class="card-sub">Supplier risk flags, credit signals</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+  </div>
+</div>
+
+<!-- LAYER 4: CORE SERVICES -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#2a1a1a;color:#fb923c">4</div>
+    <span class="layer-title" style="color:#fb923c">Core Services</span>
+    <span class="layer-desc">app/services/ · Python business logic layer</span>
+  </div>
+  <div class="layer-body">
+    <div class="card">
+      <div class="card-title">rfp_service.py</div>
+      <div class="card-sub">CRUD for RFP records, status transitions</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">storage_service.py</div>
+      <div class="card-sub">GCS upload/download, local fallback</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">llm_service.py</div>
+      <div class="card-sub">NVIDIA NIM client, prompt builder, retry</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">supplier_service.py</div>
+      <div class="card-sub">Supplier CRUD, invite token lifecycle</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">email_service.py</div>
+      <div class="card-sub">SMTP/SendGrid wrapper</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+    <div class="card">
+      <div class="card-title">auth_service.py</div>
+      <div class="card-sub">JWT validation via Supabase</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+  </div>
+</div>
+
+<!-- LAYER 5: AI / LLM -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#2a2a1a;color:#fbbf24">5</div>
+    <span class="layer-title" style="color:#fbbf24">AI / LLM Models</span>
+    <span class="layer-desc">NVIDIA NIM API · OpenAI-compatible endpoints</span>
+  </div>
+  <div class="layer-body">
+    <div class="card" style="border-color:#fbbf2440">
+      <div class="card-title" style="color:#fbbf24">Nemotron-253B</div>
+      <div class="card-sub">Deep reasoning · complex analysis · award decisions</div>
+      <div class="card-sub" style="margin-top:4px">nvidia/llama-3.1-nemotron-ultra-253b-v1</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card" style="border-color:#60a5fa40">
+      <div class="card-title" style="color:#60a5fa">LLaMA 3.1 70B</div>
+      <div class="card-sub">Fast extraction · classification · summarisation</div>
+      <div class="card-sub" style="margin-top:4px">meta/llama-3.1-70b-instruct</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Embeddings</div>
+      <div class="card-sub">Semantic search over RFP clauses</div>
+      <div class="card-sub" style="margin-top:4px">nvidia/nv-embedqa-e5-v5</div>
+      <span class="badge badge-planned">Planned</span>
+    </div>
+  </div>
+</div>
+
+<!-- LAYER 6: DATA & STORAGE -->
+<div class="layer">
+  <div class="layer-header">
+    <div class="layer-num" style="background:#1a2a1a;color:#4ade80">6</div>
+    <span class="layer-title" style="color:#4ade80">Data &amp; Storage</span>
+    <span class="layer-desc">PostgreSQL · GCS · Docker · SMTP</span>
+  </div>
+  <div class="layer-body">
+    <div class="card">
+      <div class="card-title">PostgreSQL / Supabase</div>
+      <div class="card-sub">Users, RFPs, suppliers, bids, scores</div>
+      <div class="card-sub">Alembic migrations · SQLAlchemy ORM</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Google Cloud Storage</div>
+      <div class="card-sub">PDF storage · extracted text cache</div>
+      <div class="card-sub">Bucket: STORAGE_BACKEND=gcs</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">Docker / Compose</div>
+      <div class="card-sub">docker-compose.gcs.yml · secrets mount</div>
+      <div class="card-sub">Dockerfile · multi-stage build</div>
+      <span class="badge badge-exists">Exists</span>
+    </div>
+    <div class="card">
+      <div class="card-title">SMTP / Email</div>
+      <div class="card-sub">Supplier invite notifications</div>
+      <div class="card-sub">Configurable via SMTP_* env vars</div>
+      <span class="badge badge-stub">Stub</span>
+    </div>
+  </div>
+</div>
+
+<!-- END-TO-END FLOW -->
+<div class="flow">
+  <h2>🔄 End-to-End Request Flow</h2>
+  <div class="flow-steps">
+    <div class="flow-step"><strong>1. Buyer</strong>Creates RFP<br>uploads PDF</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>2. API</strong>POST /rfp/upload<br>store → GCS</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>3. Parser Agent</strong>Extract clauses<br>&amp; requirements</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>4. Comms Agent</strong>Draft &amp; send<br>supplier invites</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>5. Supplier</strong>Submit bid<br>via portal</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>6. Scoring Agent</strong>Score bids<br>against criteria</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>7. Comparison +<br>Risk Agents</strong>Side-by-side<br>analysis</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>8. Award Agent</strong>Recommendation<br>+ rationale</div>
+    <span class="arrow">→</span>
+    <div class="flow-step"><strong>9. Report Agent</strong>Executive<br>summary PDF</div>
+  </div>
+</div>
+
+<!-- ENV VARS -->
+<div class="flow">
+  <h2>🔑 Key Environment Variables</h2>
+  <div class="env-grid">
+    <div class="env-item"><span class="env-key">STORAGE_BACKEND</span><br><span class="env-val">gcs | local</span></div>
+    <div class="env-item"><span class="env-key">GCS_BUCKET_NAME</span><br><span class="env-val">&lt;your-bucket&gt;</span></div>
+    <div class="env-item"><span class="env-key">GOOGLE_APPLICATION_CREDENTIALS</span><br><span class="env-val">/secrets/gcp-sa-key.json</span></div>
+    <div class="env-item"><span class="env-key">GOOGLE_CLOUD_PROJECT</span><br><span class="env-val">&lt;gcp-project-id&gt;</span></div>
+    <div class="env-item"><span class="env-key">NVIDIA_API_KEY</span><br><span class="env-val">nvapi-...</span></div>
+    <div class="env-item"><span class="env-key">SUPABASE_URL</span><br><span class="env-val">https://xxx.supabase.co</span></div>
+    <div class="env-item"><span class="env-key">SUPABASE_KEY</span><br><span class="env-val">eyJ...</span></div>
+    <div class="env-item"><span class="env-key">DATABASE_URL</span><br><span class="env-val">postgresql://user:pass@host/db</span></div>
+    <div class="env-item"><span class="env-key">SMTP_HOST</span><br><span class="env-val">smtp.sendgrid.net</span></div>
+    <div class="env-item"><span class="env-key">SMTP_USER / SMTP_PASS</span><br><span class="env-val">apikey / &lt;key&gt;</span></div>
+    <div class="env-item"><span class="env-key">SECRET_KEY</span><br><span class="env-val">JWT signing secret</span></div>
+    <div class="env-item"><span class="env-key">DATA_DIR</span><br><span class="env-val">/tmp/rfp-cache</span></div>
+  </div>
+</div>
+
+<p style="color:var(--muted);font-size:11px;margin-top:16px;text-align:center">RFP Intelligence Copilot · Architecture Map · muditv88-ai/Agent-Source</p>
+
+</body>
+</html>

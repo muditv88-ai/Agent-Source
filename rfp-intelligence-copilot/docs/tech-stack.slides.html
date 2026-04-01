@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="slides-format" content="viewport">
+<title>RFP Intelligence Copilot — Tech Stack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<style type="text/tailwindcss">
+@theme {
+  --color-bg: #0d1117;
+  --color-bg-deep: #010409;
+  --color-surface: #161b22;
+  --color-text: #e6edf3;
+  --color-text-secondary: #b1bac4;
+  --color-text-muted: #8b949e;
+  --color-accent-1: #2dd4bf;
+  --color-accent-2: #a78bfa;
+  --color-accent-3: #60a5fa;
+  --color-glass-bg: rgba(255,255,255,0.05);
+  --color-glass-border: rgba(255,255,255,0.08);
+  --color-vignette: rgba(0,0,0,0.5);
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', system-ui, sans-serif;
+}
+</style>
+<style>
+  :root{--color-bg:#0d1117;--color-text:#e6edf3;--glow-color-rgb:45,212,191;}
+  *,*::before,*::after{box-sizing:border-box;}
+  html,body{background:var(--color-bg);margin:0;}
+  body{font-family:'DM Sans',system-ui,sans-serif;color:var(--color-text);overflow:hidden;height:100vh;width:100vw;}
+  .deck{width:100vw;height:100vh;position:relative;}
+  .slide{position:absolute;top:0;left:0;width:100%;height:100%;background:var(--color-bg);display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transform:scale(0.95);transition:opacity 0.7s ease,transform 0.7s ease;pointer-events:none;overflow:hidden;}
+  .slide.active{opacity:1;transform:scale(1);pointer-events:all;}
+  .slide>.content{position:relative;z-index:2;width:100%;max-width:1100px;padding:clamp(1.5rem,4vw,3.5rem);}
+  .nav-controls{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:16px;z-index:100;background:rgba(255,255,255,0.05);backdrop-filter:blur(10px);padding:10px 24px;border-radius:40px;border:1px solid rgba(255,255,255,0.08);}
+  .nav-btn{width:36px;height:36px;border:none;background:rgba(255,255,255,0.06);color:#2dd4bf;border-radius:50%;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background 0.2s;}
+  .nav-btn:hover{background:rgba(255,255,255,0.12);}
+  .slide-dots{display:flex;gap:6px;}
+  .slide-dots .dot{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,0.15);cursor:pointer;transition:background 0.3s,transform 0.3s;}
+  .slide-dots .dot.active{background:#2dd4bf;transform:scale(1.3);}
+  .slide-counter{font-size:0.75rem;color:#8b949e;min-width:36px;text-align:center;}
+  .reveal{opacity:0;transform:translateY(18px);}
+  .text-glow{text-shadow:0 0 20px rgba(45,212,191,0.5),0 0 40px rgba(45,212,191,0.2);}
+  @keyframes float-slow{0%{transform:translate(0,0) scale(1);}33%{transform:translate(50px,-40px) scale(1.1);}66%{transform:translate(-30px,30px) scale(0.92);}100%{transform:translate(0,0) scale(1);}}
+  @keyframes float-drift{0%{transform:translate(0,0) scale(1);}50%{transform:translate(-60px,-50px) scale(1.12);}100%{transform:translate(0,0) scale(1);}}
+  @keyframes float{0%,100%{transform:translateY(0);}50%{transform:translateY(-12px);}}
+  .gradient-mesh{position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none;}
+  .blob{position:absolute;border-radius:50%;filter:blur(80px);animation:float-slow 12s ease-in-out infinite;}
+  .blob:nth-child(2){animation:float-drift 16s ease-in-out infinite;}
+  .blob:nth-child(3){animation:float-slow 20s ease-in-out infinite reverse;}
+  .slide::before{content:'';position:absolute;inset:0;z-index:1;pointer-events:none;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");background-repeat:repeat;background-size:256px 256px;opacity:0.03;mix-blend-mode:overlay;}
+  .slide::after{content:'';position:absolute;inset:0;z-index:1;pointer-events:none;background:radial-gradient(ellipse at center,transparent 50%,rgba(0,0,0,0.5) 100%);}
+  .glass{background:rgba(255,255,255,0.05);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,0.08);border-radius:12px;}
+  .badge-g{display:inline-block;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;background:#1a3a2a;color:#4ade80;border:1px solid #2d6a45;}
+  .badge-y{display:inline-block;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;background:#3a2e10;color:#fbbf24;border:1px solid #6a5020;}
+  .badge-b{display:inline-block;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:600;background:#1a2a3a;color:#60a5fa;border:1px solid #2d4a6a;}
+</style>
+</head>
+<body>
+<div class="mouse-spotlight" style="position:fixed;inset:0;z-index:99;pointer-events:none;"></div>
+<div class="deck">
+
+<!-- SLIDE 1: TITLE -->
+<div class="slide active" data-slide="1">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:500px;height:500px;top:-120px;right:-100px;background:#2dd4bf;opacity:0.12;"></div>
+    <div class="blob" style="width:350px;height:350px;bottom:-80px;left:-80px;background:#a78bfa;opacity:0.1;"></div>
+    <div class="blob" style="width:200px;height:200px;top:40%;left:10%;background:#60a5fa;opacity:0.08;"></div>
+  </div>
+  <canvas class="particle-canvas" style="position:absolute;inset:0;z-index:1;"></canvas>
+  <div class="content text-center">
+    <div style="font-size:80px;margin-bottom:16px;animation:float 3s ease-in-out infinite;">⚙️</div>
+    <h1 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(2.2rem,5.5vw,4.5rem);font-weight:700;background:linear-gradient(135deg,#2dd4bf,#a78bfa,#2dd4bf);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:12px;">RFP Intelligence Copilot</h1>
+    <p class="reveal" style="font-size:clamp(0.85rem,1.4vw,1.1rem);letter-spacing:5px;text-transform:uppercase;color:#8b949e;margin-bottom:24px;">Full Tech Stack · System Architecture</p>
+    <p class="reveal" style="color:#8b949e;font-size:13px;">muditv88-ai · April 2026</p>
+  </div>
+</div>
+
+<!-- SLIDE 2: AGENDA -->
+<div class="slide" data-slide="2">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#2dd4bf;opacity:0.07;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#a78bfa;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#2dd4bf;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Overview</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;margin-bottom:28px;">Architecture at a Glance</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;">
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">🖥️</div>
+        <div style="font-weight:600;color:#60a5fa;margin-bottom:4px;">Frontend</div>
+        <div style="font-size:12px;color:#8b949e;">React 18 · Vite · Tailwind</div>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">⚡</div>
+        <div style="font-weight:600;color:#a78bfa;margin-bottom:4px;">API Gateway</div>
+        <div style="font-size:12px;color:#8b949e;">FastAPI · Python 3.11</div>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">🤖</div>
+        <div style="font-weight:600;color:#2dd4bf;margin-bottom:4px;">Agent Loop</div>
+        <div style="font-size:12px;color:#8b949e;">10 specialist agents</div>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">🧠</div>
+        <div style="font-weight:600;color:#fbbf24;margin-bottom:4px;">LLM Models</div>
+        <div style="font-size:12px;color:#8b949e;">NVIDIA NIM · Nemotron</div>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">🗄️</div>
+        <div style="font-weight:600;color:#4ade80;margin-bottom:4px;">Data Store</div>
+        <div style="font-size:12px;color:#8b949e;">PostgreSQL · GCS</div>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-size:24px;margin-bottom:8px;">🐳</div>
+        <div style="font-weight:600;color:#fb923c;margin-bottom:4px;">Infra</div>
+        <div style="font-size:12px;color:#8b949e;">Docker · Supabase</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 3: FRONTEND -->
+<div class="slide" data-slide="3">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:320px;height:320px;top:-70px;right:-70px;background:#60a5fa;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#2dd4bf;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#60a5fa;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Layer 1</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;color:#60a5fa;margin-bottom:24px;">Frontend</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+      <div class="glass" style="padding:16px;">
+        <div style="font-weight:600;margin-bottom:6px;">Stack</div>
+        <ul style="color:#b1bac4;font-size:13px;list-style:none;display:flex;flex-direction:column;gap:4px;">
+          <li>⚛️ React 18 + TypeScript</li>
+          <li>⚡ Vite (build tool)</li>
+          <li>🎨 Tailwind CSS v3</li>
+          <li>🔀 React Router v6</li>
+          <li>🌐 Axios (API client)</li>
+        </ul>
+      </div>
+      <div class="glass" style="padding:16px;">
+        <div style="font-weight:600;margin-bottom:8px;">Pages</div>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;color:#b1bac4;">Dashboard</span>
+            <span class="badge-y">Stub</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;color:#b1bac4;">RFP Creator</span>
+            <span class="badge-g">Exists</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;color:#b1bac4;">Supplier Portal</span>
+            <span class="badge-b">Planned</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;color:#b1bac4;">Analysis View</span>
+            <span class="badge-y">Stub</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:13px;color:#b1bac4;">Auth (Login/Register)</span>
+            <span class="badge-g">Exists</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 4: API GATEWAY -->
+<div class="slide" data-slide="4">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#a78bfa;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#60a5fa;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#a78bfa;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Layer 2</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;color:#a78bfa;margin-bottom:24px;">API Gateway</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">POST /rfp/upload</div>
+        <div style="font-size:12px;color:#8b949e;">Ingest PDF → GCS</div>
+        <div style="margin-top:6px;"><span class="badge-g">Exists</span></div>
+      </div>
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">POST /rfp/analyze</div>
+        <div style="font-size:12px;color:#8b949e;">Trigger agent loop</div>
+        <div style="margin-top:6px;"><span class="badge-g">Exists</span></div>
+      </div>
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">POST /supplier/invite</div>
+        <div style="font-size:12px;color:#8b949e;">Send invite email</div>
+        <div style="margin-top:6px;"><span class="badge-y">Stub</span></div>
+      </div>
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">POST /response/submit</div>
+        <div style="font-size:12px;color:#8b949e;">Receive supplier bid</div>
+        <div style="margin-top:6px;"><span class="badge-b">Planned</span></div>
+      </div>
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">GET /analysis/{id}</div>
+        <div style="font-size:12px;color:#8b949e;">Scored results</div>
+        <div style="margin-top:6px;"><span class="badge-y">Stub</span></div>
+      </div>
+      <div class="glass" style="padding:14px;">
+        <div style="font-family:monospace;font-size:12px;color:#a78bfa;margin-bottom:4px;">WS /agent/stream</div>
+        <div style="font-size:12px;color:#8b949e;">Real-time thoughts</div>
+        <div style="margin-top:6px;"><span class="badge-b">Planned</span></div>
+      </div>
+    </div>
+    <div class="reveal" style="margin-top:14px;font-size:12px;color:#8b949e;">FastAPI · Python 3.11 · Uvicorn · Pydantic v2 · SQLAlchemy</div>
+  </div>
+</div>
+
+<!-- SLIDE 5: AGENT LOOP -->
+<div class="slide" data-slide="5">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:350px;height:350px;top:-80px;right:-80px;background:#2dd4bf;opacity:0.1;"></div>
+    <div class="blob" style="width:250px;height:250px;bottom:-60px;left:-50px;background:#a78bfa;opacity:0.07;"></div>
+  </div>
+  <canvas class="particle-canvas-ambient" style="position:absolute;inset:0;z-index:1;"></canvas>
+  <div class="content">
+    <p class="reveal" style="color:#2dd4bf;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Layer 3</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.6rem,3vw,2.4rem);font-weight:700;color:#2dd4bf;margin-bottom:8px;">Agent Orchestration</h2>
+    <p class="reveal" style="color:#8b949e;font-size:13px;margin-bottom:18px;">Plan → Execute → Observe → Respond · agent_loop.py</p>
+    <div class="reveal" style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;">
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">🔍</div>
+        <div style="font-size:11px;font-weight:600;">RFP Parser</div>
+        <div style="margin-top:4px;"><span class="badge-g">✓</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">📋</div>
+        <div style="font-size:11px;font-weight:600;">Requirements</div>
+        <div style="margin-top:4px;"><span class="badge-g">✓</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">🏷️</div>
+        <div style="font-size:11px;font-weight:600;">Scoring</div>
+        <div style="margin-top:4px;"><span class="badge-y">~</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">📊</div>
+        <div style="font-size:11px;font-weight:600;">Comparison</div>
+        <div style="margin-top:4px;"><span class="badge-y">~</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">⚖️</div>
+        <div style="font-size:11px;font-weight:600;">Compliance</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">💰</div>
+        <div style="font-size:11px;font-weight:600;">Cost Analyst</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">✉️</div>
+        <div style="font-size:11px;font-weight:600;">Comms</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">🏆</div>
+        <div style="font-size:11px;font-weight:600;">Award</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">📝</div>
+        <div style="font-size:11px;font-weight:600;">Report</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+      <div class="glass" style="padding:10px;text-align:center;">
+        <div style="font-size:20px;margin-bottom:4px;">🛡️</div>
+        <div style="font-size:11px;font-weight:600;">Risk</div>
+        <div style="margin-top:4px;"><span class="badge-b">→</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 6: LLM -->
+<div class="slide" data-slide="6">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#fbbf24;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#2dd4bf;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#fbbf24;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Layer 5</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;color:#fbbf24;margin-bottom:24px;">AI / LLM Models</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+      <div class="glass" style="padding:20px;border-color:rgba(251,191,36,0.2);">
+        <div style="font-size:32px;margin-bottom:10px;">🧠</div>
+        <div style="font-weight:700;font-size:15px;color:#fbbf24;margin-bottom:6px;">Nemotron-253B</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:8px;">Deep reasoning · complex analysis · award decisions</div>
+        <div style="font-family:monospace;font-size:10px;color:#8b949e;">nvidia/llama-3.1-nemotron-ultra-253b-v1</div>
+      </div>
+      <div class="glass" style="padding:20px;border-color:rgba(96,165,250,0.2);">
+        <div style="font-size:32px;margin-bottom:10px;">⚡</div>
+        <div style="font-weight:700;font-size:15px;color:#60a5fa;margin-bottom:6px;">LLaMA 3.1 70B</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:8px;">Fast extraction · classification · summarisation</div>
+        <div style="font-family:monospace;font-size:10px;color:#8b949e;">meta/llama-3.1-70b-instruct</div>
+      </div>
+      <div class="glass" style="padding:20px;border-color:rgba(45,212,191,0.2);">
+        <div style="font-size:32px;margin-bottom:10px;">🔎</div>
+        <div style="font-weight:700;font-size:15px;color:#2dd4bf;margin-bottom:6px;">Embeddings</div>
+        <div style="font-size:12px;color:#8b949e;margin-bottom:8px;">Semantic search over RFP clauses <span class="badge-b">Planned</span></div>
+        <div style="font-family:monospace;font-size:10px;color:#8b949e;">nvidia/nv-embedqa-e5-v5</div>
+      </div>
+    </div>
+    <div class="reveal" style="margin-top:14px;font-size:12px;color:#8b949e;">All models served via NVIDIA NIM · OpenAI-compatible REST API · Configurable via NVIDIA_API_KEY</div>
+  </div>
+</div>
+
+<!-- SLIDE 7: DATA -->
+<div class="slide" data-slide="7">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#4ade80;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#60a5fa;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#4ade80;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Layer 6</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;color:#4ade80;margin-bottom:24px;">Data &amp; Storage</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;">
+      <div class="glass" style="padding:18px;">
+        <div style="font-size:28px;margin-bottom:8px;">🗄️</div>
+        <div style="font-weight:600;color:#4ade80;margin-bottom:4px;">PostgreSQL / Supabase</div>
+        <div style="font-size:12px;color:#8b949e;">Users · RFPs · suppliers · bids · scores<br>SQLAlchemy ORM · Alembic migrations</div>
+        <div style="margin-top:8px;"><span class="badge-g">Exists</span></div>
+      </div>
+      <div class="glass" style="padding:18px;">
+        <div style="font-size:28px;margin-bottom:8px;">☁️</div>
+        <div style="font-weight:600;color:#60a5fa;margin-bottom:4px;">Google Cloud Storage</div>
+        <div style="font-size:12px;color:#8b949e;">PDF & document store · extracted text cache<br>docker-compose.gcs.yml · secrets mount</div>
+        <div style="margin-top:8px;"><span class="badge-g">Exists</span></div>
+      </div>
+      <div class="glass" style="padding:18px;">
+        <div style="font-size:28px;margin-bottom:8px;">🐳</div>
+        <div style="font-weight:600;color:#fb923c;margin-bottom:4px;">Docker</div>
+        <div style="font-size:12px;color:#8b949e;">Multi-stage Dockerfile · Compose for local dev<br>GCS compose variant with secrets volume</div>
+        <div style="margin-top:8px;"><span class="badge-g">Exists</span></div>
+      </div>
+      <div class="glass" style="padding:18px;">
+        <div style="font-size:28px;margin-bottom:8px;">✉️</div>
+        <div style="font-weight:600;color:#f472b6;margin-bottom:4px;">SMTP / Email</div>
+        <div style="font-size:12px;color:#8b949e;">Supplier invite notifications<br>Configurable SMTP_HOST · SMTP_USER · SMTP_PASS</div>
+        <div style="margin-top:8px;"><span class="badge-y">Stub</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 8: DATA FLOW -->
+<div class="slide" data-slide="8">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#2dd4bf;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#a78bfa;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#2dd4bf;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">End-to-End</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;margin-bottom:20px;">Request Flow</h2>
+    <div class="reveal" style="display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#60a5fa;">1. Buyer</div><div style="font-size:11px;color:#8b949e;">Creates RFP</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#a78bfa;">2. API</div><div style="font-size:11px;color:#8b949e;">/rfp/upload → GCS</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#2dd4bf;">3. Parser Agent</div><div style="font-size:11px;color:#8b949e;">Extract clauses</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#f472b6;">4. Comms Agent</div><div style="font-size:11px;color:#8b949e;">Send invites</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#fb923c;">5. Supplier</div><div style="font-size:11px;color:#8b949e;">Submit bid</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#fbbf24;">6. Score Agent</div><div style="font-size:11px;color:#8b949e;">Weighted scoring</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#4ade80;">7. Risk + Compare</div><div style="font-size:11px;color:#8b949e;">Side-by-side</div></div>
+        <span style="color:#8b949e;">→</span>
+        <div class="glass" style="padding:10px 14px;min-width:120px;text-align:center;"><div style="font-size:11px;font-weight:600;color:#2dd4bf;">8. Award + Report</div><div style="font-size:11px;color:#8b949e;">Decision PDF</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 9: STATUS -->
+<div class="slide" data-slide="9">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:300px;height:300px;top:-60px;right:-60px;background:#a78bfa;opacity:0.08;"></div>
+    <div class="blob" style="width:200px;height:200px;bottom:-50px;left:-40px;background:#2dd4bf;opacity:0.06;"></div>
+  </div>
+  <div class="content">
+    <p class="reveal" style="color:#a78bfa;font-size:12px;letter-spacing:4px;text-transform:uppercase;margin-bottom:12px;">Status</p>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(1.8rem,3.5vw,2.8rem);font-weight:700;margin-bottom:24px;">Feature Completeness</h2>
+    <div class="reveal" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+      <div class="glass" style="padding:18px;border-color:rgba(74,222,128,0.2);">
+        <div style="font-size:2rem;font-weight:700;color:#4ade80;margin-bottom:4px;" data-count="7">0</div>
+        <div style="font-weight:600;color:#4ade80;margin-bottom:4px;">Exists</div>
+        <div style="font-size:12px;color:#8b949e;">Auth, RFP upload, parser, requirements agent, LLM service, storage, Docker</div>
+      </div>
+      <div class="glass" style="padding:18px;border-color:rgba(251,191,36,0.2);">
+        <div style="font-size:2rem;font-weight:700;color:#fbbf24;margin-bottom:4px;" data-count="5">0</div>
+        <div style="font-weight:600;color:#fbbf24;margin-bottom:4px;">Stub</div>
+        <div style="font-size:12px;color:#8b949e;">Dashboard, scoring agent, analysis view, supplier service, email service</div>
+      </div>
+      <div class="glass" style="padding:18px;border-color:rgba(96,165,250,0.2);">
+        <div style="font-size:2rem;font-weight:700;color:#60a5fa;margin-bottom:4px;" data-count="8">0</div>
+        <div style="font-weight:600;color:#60a5fa;margin-bottom:4px;">Planned</div>
+        <div style="font-size:12px;color:#8b949e;">Compliance, cost, comms, award, report, risk agents · supplier portal · websocket stream</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SLIDE 10: CLOSING -->
+<div class="slide" data-slide="10">
+  <div class="gradient-mesh">
+    <div class="blob" style="width:500px;height:500px;top:-120px;right:-100px;background:#2dd4bf;opacity:0.12;"></div>
+    <div class="blob" style="width:350px;height:350px;bottom:-80px;left:-80px;background:#a78bfa;opacity:0.1;"></div>
+    <div class="blob" style="width:200px;height:200px;top:40%;left:8%;background:#60a5fa;opacity:0.08;"></div>
+  </div>
+  <canvas class="particle-canvas" style="position:absolute;inset:0;z-index:1;"></canvas>
+  <div class="content text-center">
+    <div style="font-size:70px;margin-bottom:16px;animation:float 3s ease-in-out infinite;">🚀</div>
+    <h2 class="reveal" style="font-family:'Instrument Serif',serif;font-size:clamp(2rem,5vw,3.8rem);font-weight:700;background:linear-gradient(135deg,#2dd4bf,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:12px;">Built to Scale</h2>
+    <p class="reveal" style="color:#b1bac4;max-width:500px;margin:0 auto 20px;font-size:14px;">FastAPI backend · React frontend · 10 AI agents · NVIDIA NIM LLMs · GCS storage · Supabase auth · Docker deployable</p>
+    <p class="reveal" style="color:#8b949e;font-size:12px;letter-spacing:3px;text-transform:uppercase;">muditv88-ai / Agent-Source</p>
+  </div>
+</div>
+
+</div>
+
+<div class="nav-controls">
+  <button class="nav-btn" onclick="changeSlide(-1)">&#8249;</button>
+  <div class="slide-dots" id="dots"></div>
+  <button class="nav-btn" onclick="changeSlide(1)">&#8250;</button>
+  <span class="slide-counter" id="counter">1 / 10</span>
+</div>
+
+<script>
+  let current=1;
+  const total=document.querySelectorAll('.slide').length;
+  const dotsContainer=document.getElementById('dots');
+  const counter=document.getElementById('counter');
+  for(let i=1;i<=total;i++){const dot=document.createElement('div');dot.className='dot'+(i===1?' active':'');dot.onclick=()=>goToSlide(i);dotsContainer.appendChild(dot);}
+  function goToSlide(n){const prev=document.querySelector('.slide.active');const next=document.querySelector(`.slide[data-slide="${n}"]`);if(prev)prev.classList.remove('active');if(next){next.classList.add('active');animateSlide(next);}current=n;updateNav();}
+  function changeSlide(dir){let next=current+dir;if(next<1)next=total;if(next>total)next=1;goToSlide(next);}
+  function updateNav(){document.querySelectorAll('.dot').forEach((d,i)=>{d.classList.toggle('active',i+1===current);});counter.textContent=current+' / '+total;}
+  document.addEventListener('keydown',(e)=>{if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();changeSlide(1);}if(e.key==='ArrowLeft'){e.preventDefault();changeSlide(-1);}});
+  let touchStartX=0;
+  document.addEventListener('touchstart',(e)=>{touchStartX=e.touches[0].clientX;});
+  document.addEventListener('touchend',(e)=>{const diff=touchStartX-e.changedTouches[0].clientX;if(Math.abs(diff)>50)changeSlide(diff>0?1:-1);});
+  function animateSlide(slide){
+    slide.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transition='none';el.style.opacity='0';el.style.transform='translateY(18px)';el.offsetHeight;const delay=i*0.08;el.style.transition=`opacity 0.35s ease ${delay}s, transform 0.35s ease ${delay}s`;el.style.opacity='1';el.style.transform='translateY(0px)';});
+    slide.querySelectorAll('[data-count]:not(.counted)').forEach(el=>{el.classList.add('counted');const target=parseInt(el.dataset.count);let cur=0;const step=target/40;const timer=setInterval(()=>{cur+=step;if(cur>=target){cur=target;clearInterval(timer);}el.textContent=Math.round(cur);},30);});
+  }
+  document.addEventListener('mousemove',(e)=>{const s=document.querySelector('.mouse-spotlight');if(s)s.style.background=`radial-gradient(600px circle at ${e.clientX}px ${e.clientY}px,rgba(45,212,191,0.05),transparent 40%)`;});
+  window.initParticles=function(canvas,options){if(!canvas)return;const ctx=canvas.getContext('2d');canvas.width=canvas.offsetWidth;canvas.height=canvas.offsetHeight;const count=options.count||(options.interactive?55:18);let mx=-1000,my=-1000;const particles=Array.from({length:count},()=>({x:Math.random()*canvas.width,y:Math.random()*canvas.height,vx:(Math.random()-0.5)*0.3,vy:(Math.random()-0.5)*0.3,size:Math.random()*2+0.8,alpha:Math.random()*0.3+0.1}));if(options.interactive){canvas.addEventListener('mousemove',(e)=>{const r=canvas.getBoundingClientRect();mx=e.clientX-r.left;my=e.clientY-r.top;});canvas.addEventListener('mouseleave',()=>{mx=-1000;my=-1000;});}
+  (function animate(){ctx.clearRect(0,0,canvas.width,canvas.height);particles.forEach(p=>{if(options.interactive){const dx=p.x-mx,dy=p.y-my,dist=Math.sqrt(dx*dx+dy*dy);if(dist<120){const force=(120-dist)/120*2;p.vx+=(dx/dist)*force*0.1;p.vy+=(dy/dist)*force*0.1;}}p.vx*=0.98;p.vy*=0.98;p.x+=p.vx;p.y+=p.vy;if(p.x<0)p.x=canvas.width;if(p.x>canvas.width)p.x=0;if(p.y<0)p.y=canvas.height;if(p.y>canvas.height)p.y=0;ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fillStyle=`rgba(45,212,191,${p.alpha})`;ctx.fill();});requestAnimationFrame(animate);})();};
+  document.querySelectorAll('.particle-canvas').forEach(c=>window.initParticles(c,{interactive:true,count:55}));
+  document.querySelectorAll('.particle-canvas-ambient').forEach(c=>window.initParticles(c,{interactive:false,count:18}));
+  try{animateSlide(document.querySelector('.slide.active'));}catch(e){}
+</script>
+</body>
+</html>
