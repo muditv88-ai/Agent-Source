@@ -13,25 +13,39 @@ jobs:
           fetch-depth: 0
           lfs: true
 
+      - name: Check HF_TOKEN is set
+        run: |
+          if [ -z "${{ secrets.HF_TOKEN }}" ]; then
+            echo "ERROR: HF_TOKEN secret is not set or is empty!"
+            echo "Go to: https://github.com/muditv88-ai/Agent-Source/settings/secrets/actions"
+            echo "Add a secret named HF_TOKEN with a Hugging Face WRITE token."
+            exit 1
+          else
+            echo "HF_TOKEN is set (length: ${#HF_TOKEN} chars)"
+          fi
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
       - name: Push subfolder to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Copy only the app subfolder to a temp dir
+          echo "Copying rfp-intelligence-copilot to temp dir..."
           cp -r rfp-intelligence-copilot /tmp/hf-space
           cd /tmp/hf-space
 
-          # Init a fresh git repo and point it at the HF Space
+          echo "Initialising git repo..."
           git init
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
 
-          # Add HF remote
+          echo "Adding remote..."
           git remote add space https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend
 
-          # Commit everything
+          echo "Committing files..."
           git add -A
           git commit -m "Sync from GitHub $GITHUB_SHA"
 
-          # Force push to main branch on HF Space
+          echo "Pushing to HF Space..."
           git push --force space HEAD:main
+          echo "Done!"
