@@ -5,10 +5,27 @@ import re
 from openai import OpenAI
 from typing import List, Dict, Any, Optional
 
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.environ.get("NVIDIA_API_KEY"),
-)
+# ── Client is lazy-initialised the first time it is needed. ──────────────────
+# Instantiating at module-level causes an OpenAIError crash on import when the
+# NVIDIA_API_KEY env-var has not been set yet (e.g. during container startup).
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        api_key = os.environ.get("NVIDIA_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "NVIDIA_API_KEY environment variable is not set. "
+                "Add it in the HuggingFace Space → Settings → Repository secrets."
+            )
+        _client = OpenAI(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key=api_key,
+        )
+    return _client
+
 
 MODEL = "nvidia/llama-3.1-nemotron-ultra-253b-v1"
 
@@ -52,11 +69,9 @@ def _repair_json(raw: str) -> str:
     Attempt to close a truncated/malformed JSON string by balancing
     open braces, brackets, and unterminated strings.
     """
-    # Strip markdown code fences
     raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
     raw = re.sub(r"\s*```$", "", raw.strip())
 
-    # Track what's open
     stack = []
     in_string = False
     escaped = False
@@ -81,11 +96,8 @@ def _repair_json(raw: str) -> str:
                     stack.pop()
         repaired.append(char)
 
-    # Close any open string
     if in_string:
         repaired.append('"')
-
-    # Close any open structures in reverse order
     for closer in reversed(stack):
         repaired.append(closer)
 
@@ -94,13 +106,11 @@ def _repair_json(raw: str) -> str:
 
 def _parse_json(raw: str) -> Dict:
     """Parse LLM JSON output with progressive fallback and repair."""
-    # Pass 1: direct parse
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         pass
 
-    # Pass 2: strip markdown fences
     cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s*```$", "", cleaned.strip())
     try:
@@ -108,7 +118,6 @@ def _parse_json(raw: str) -> Dict:
     except json.JSONDecodeError:
         pass
 
-    # Pass 3: extract outermost {...} block
     match = re.search(r"(\{.*)", cleaned, re.DOTALL)
     if match:
         candidate = match.group(1)
@@ -116,8 +125,6 @@ def _parse_json(raw: str) -> Dict:
             return json.loads(candidate)
         except json.JSONDecodeError:
             pass
-
-        # Pass 4: repair truncated JSON
         try:
             repaired = _repair_json(candidate)
             return json.loads(repaired)
@@ -156,16 +163,27 @@ def _call_llm_for_chunk(
         f"RFP Questions to look for in this section:\n{questions_summary}\n\n"
         f"Supplier Response Section:\n{chunk}"
     )
-    response = client.chat.completions.create(
+    response = _get_client().chat.completions.create(
         model=MODEL,
         messages=[
             {"role": "system", "content": "detailed thinking off"},
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,
-        max_tokens=3000,  # capped to leave headroom and prevent runaway output
+        max_tokens=3000,
     )
     return _parse_json(_extract_content(response))
+
+
+def parse_supplier_response(
+    supplier_document_text: str,
+    rfp_questions: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Public alias kept for backward-compatibility with rfp.py route.
+    Delegates to extract_supplier_answers.
+    """
+    return extract_supplier_answers(supplier_document_text, rfp_questions)
 
 
 def extract_supplier_answers(
@@ -174,15 +192,7 @@ def extract_supplier_answers(
 ) -> Dict[str, Any]:
     """
     Map supplier document answers to ALL RFP questions.
-
-    Strategy to prevent data loss on large files:
-    1. Split document on sheet boundaries, then further chunk large sections.
-    2. Batch questions into groups of QUESTIONS_PER_CALL to keep prompts small.
-    3. For each (chunk x question_batch) pair, call the LLM.
-    4. Use partial JSON repair so truncated responses still yield partial data.
-    5. Merge all answers across all calls.
     """
-    # Split on sheet boundaries first
     sections = re.split(r"(?=^=== Sheet:)", supplier_document_text, flags=re.MULTILINE)
     sections = [s.strip() for s in sections if s.strip()]
     if not sections:
@@ -191,7 +201,6 @@ def extract_supplier_answers(
     merged_answers: Dict[str, str] = {}
     supplier_name = "Unknown Supplier"
 
-    # Batch questions so each API call handles at most QUESTIONS_PER_CALL
     question_batches = [
         questions[i: i + QUESTIONS_PER_CALL]
         for i in range(0, len(questions), QUESTIONS_PER_CALL)
@@ -203,14 +212,13 @@ def extract_supplier_answers(
             if not chunk.strip():
                 continue
             for q_batch in question_batches:
-                # Skip question batches whose IDs are already fully answered
                 unanswered = [
                     q for q in q_batch
                     if merged_answers.get(q["question_id"], "No response provided")
                     == "No response provided"
                 ]
                 if not unanswered:
-                    continue  # all questions in this batch answered, skip call
+                    continue
 
                 try:
                     result = _call_llm_for_chunk(chunk, unanswered, supplier_name)
@@ -232,9 +240,8 @@ def extract_supplier_answers(
 
                 except Exception as e:
                     print(f"Warning: chunk/batch extraction failed: {e}")
-                    continue  # non-fatal — other chunks/batches will still run
+                    continue
 
-    # Fill in any questions never answered across all calls
     for q in questions:
         if q["question_id"] not in merged_answers:
             merged_answers[q["question_id"]] = "No response provided"
