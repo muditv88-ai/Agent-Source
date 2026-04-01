@@ -2,11 +2,12 @@
 # Production compose file — uses Google Cloud Storage for persistent data.
 #
 # Usage:
-#   1. Copy .env.example to .env and fill in all values.
+#   1. Copy .env.example to .env and fill in your remaining values
+#      (OPENAI_API_KEY, SECRET_KEY, GOOGLE_APPLICATION_CREDENTIALS, etc.).
 #   2. Place your GCP service account JSON key at ./secrets/gcp-sa-key.json
-#      (the path referenced by GOOGLE_APPLICATION_CREDENTIALS inside the container).
 #   3. docker compose -f docker-compose.gcs.yml up -d
 #
+# GCS bucket: gs://my-unique-sourceiq-bucket/
 # The container mounts ./secrets/ as read-only into /secrets/.
 # No data is written to the local filesystem beyond /tmp — GCS is the source of truth.
 
@@ -23,9 +24,9 @@ services:
     env_file:
       - .env
     environment:
-      # GCS backend — override any local default
       STORAGE_BACKEND: gcs
-      DATA_DIR: /tmp/rfp-cache  # ephemeral local cache (GCS is source of truth)
+      GCS_BUCKET_NAME: my-unique-sourceiq-bucket
+      DATA_DIR: /tmp/rfp-cache  # ephemeral local cache; GCS is source of truth
     volumes:
       # Mount your GCP service account key read-only into the container
       - ./secrets:/secrets:ro
@@ -37,5 +38,3 @@ services:
       start_period: 15s
 
 # No named volumes needed — GCS handles all persistence.
-# The /tmp/rfp-cache inside the container is used only as a warm cache
-# for files fetched from GCS during a request; it is intentionally ephemeral.
