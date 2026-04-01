@@ -1,5 +1,5 @@
 """
-project_store.py  v3.2  — three-backend storage (GCS | HF Dataset | local).
+project_store.py  v3.3  — three-backend storage (GCS | HF Dataset | local).
 
 Backend selection via STORAGE_BACKEND env var:
 
@@ -7,7 +7,13 @@ Backend selection via STORAGE_BACKEND env var:
                      Fine for local dev and paid HF Spaces with a volume.
 
   gcs                Google Cloud Storage.
-                     Requires GCS_BUCKET_NAME + GCP credentials.
+                     Requires GCS_BUCKET_NAME + one of:
+                       • GCS_CREDENTIALS_JSON  (recommended for HF Spaces)
+                           Set this Space secret to the full contents of your
+                           service-account JSON key file.
+                       • GOOGLE_APPLICATION_CREDENTIALS  (path to key file)
+                           Works in Docker / local dev where you mount the file.
+                       • Workload Identity / ADC  (GCP-hosted environments)
 
   hf                 Hugging Face Dataset repo  ← recommended for HF Spaces
                      Requires HF_TOKEN + HF_REPO_ID secrets in the Space.
@@ -41,8 +47,25 @@ _gcs_enabled = False
 if STORAGE_BACKEND == "gcs":
     try:
         from google.cloud import storage as _gcs
-        _gcs_client  = _gcs.Client()
-        _gcs_bucket  = _gcs_client.bucket(GCS_BUCKET_NAME)
+
+        _creds_json = os.environ.get("GCS_CREDENTIALS_JSON", "").strip()
+        if _creds_json:
+            # HF Spaces: full SA key JSON stored as a Space secret
+            from google.oauth2 import service_account as _sa
+            _info    = json.loads(_creds_json)
+            _creds   = _sa.Credentials.from_service_account_info(
+                _info,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            _project = _info.get("project_id")
+            _gcs_client = _gcs.Client(project=_project, credentials=_creds)
+            print("[project_store] GCS auth: service-account from GCS_CREDENTIALS_JSON")
+        else:
+            # Docker / local dev: GOOGLE_APPLICATION_CREDENTIALS path or ADC
+            _gcs_client = _gcs.Client()
+            print("[project_store] GCS auth: ADC / GOOGLE_APPLICATION_CREDENTIALS")
+
+        _gcs_bucket = _gcs_client.bucket(GCS_BUCKET_NAME)
         _gcs_bucket.reload()
         _gcs_enabled = True
         print(f"[project_store] GCS backend active: gs://{GCS_BUCKET_NAME}")
