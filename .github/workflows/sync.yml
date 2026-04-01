@@ -8,7 +8,7 @@ jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: true
@@ -17,13 +17,19 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Split out only the rfp-intelligence-copilot/ subfolder
-          # so the Dockerfile lands at the root of the HF Space
+          # Clone the HF Space repo into a temp directory
+          git clone https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend /tmp/hf-space
+
+          # Wipe existing contents (keep .git)
+          find /tmp/hf-space -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+
+          # Copy only the subfolder contents into the Space root
+          cp -r rfp-intelligence-copilot/. /tmp/hf-space/
+
+          # Commit and push
+          cd /tmp/hf-space
           git config user.email "action@github.com"
           git config user.name "GitHub Action"
-
-          SPLIT_SHA=$(git subtree split --prefix=rfp-intelligence-copilot HEAD)
-
-          git push --force \
-            https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend \
-            $SPLIT_SHA:main
+          git add -A
+          git diff --cached --quiet || git commit -m "Sync from GitHub: $GITHUB_SHA"
+          git push
