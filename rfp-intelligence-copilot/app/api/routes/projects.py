@@ -208,7 +208,6 @@ async def parse_project_rfp(project_id: str, background_tasks: BackgroundTasks):
 
 @router.post("/{project_id}/analyze")
 async def analyze_project(project_id: str, background_tasks: BackgroundTasks):
-    from app.api.routes.analysis import _run_analysis_job
     project = get_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
