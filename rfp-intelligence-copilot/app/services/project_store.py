@@ -1,10 +1,19 @@
 """
-project_store.py — dual-backend storage (GCS or local filesystem).
+project_store.py  v3.1  — dual-backend storage (GCS or local filesystem).
 
-Set STORAGE_BACKEND=gcs to use Google Cloud Storage.
-Falls back to local filesystem if GCS is unavailable or STORAGE_BACKEND!=gcs.
+v3.1 FIX: PROJECTS_DIR is now an absolute path resolved from the DATA_DIR
+environment variable so that project data survives server restarts and
+redeployments on cloud hosts.
 
-GCS layout:
+  DATA_DIR  (env)  — root directory for all persistent data.
+                     Default: /app/data  on Linux/Mac,  .\\data  on Windows.
+                     Point this at a mounted persistent volume in production.
+
+  PROJECTS_DIR = DATA_DIR / "projects"   (created automatically)
+
+Set STORAGE_BACKEND=gcs to use Google Cloud Storage instead.
+
+GCS layout (unchanged):
   projects/{project_id}/project.json
   projects/{project_id}/rfp/{filename}
   projects/{project_id}/suppliers/{filename}
@@ -12,11 +21,6 @@ GCS layout:
   projects/{project_id}/metadata/suppliers.json
   projects/{project_id}/metadata/feature_flags.json
   projects/{project_id}/metadata/audit_log.json
-
-v3.0 additions (all backward-compatible):
-  - list_project_files()   — list RFP + supplier files stored in GCS or local
-  - get_signed_url()       — generate a time-limited GCS signed URL (or local path)
-  - delete_rfp_file()      — remove stored RFP file
 """
 import io
 import json
@@ -49,10 +53,36 @@ if STORAGE_BACKEND == "gcs":
 if not _gcs_enabled:
     print("[project_store] Using local filesystem storage")
 
-# ── Local paths ──────────────────────────────────────────────────────────────
 
-PROJECTS_DIR = Path("projects")
-PROJECTS_DIR.mkdir(exist_ok=True)
+# ── Persistent local paths ────────────────────────────────────────────────────
+# v3.1: Use an absolute path so data is NOT wiped on restart.
+#
+# Priority order:
+#   1. DATA_DIR env var (set this in production, point at a mounted volume)
+#   2. /app/data          (standard for Docker / Railway / Render / Fly.io)
+#   3. ./data             (local dev fallback)
+#
+# Always use PROJECTS_DIR everywhere in this file — never use Path('projects').
+
+def _resolve_data_dir() -> Path:
+    """Return an absolute path for the data root. Never ephemeral."""
+    env_val = os.environ.get("DATA_DIR", "").strip()
+    if env_val:
+        return Path(env_val).resolve()
+    # On a real Linux server / Docker container /app exists; use that.
+    # On a dev machine (Mac/Windows) fall back to a local ./data folder.
+    candidate = Path("/app/data")
+    if candidate.parent.exists():   # /app exists → we're in a container
+        return candidate
+    return Path("data").resolve()   # local dev
+
+
+DATA_DIR: Path = _resolve_data_dir()
+PROJECTS_DIR: Path = DATA_DIR / "projects"
+PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+
+print(f"[project_store] PROJECTS_DIR = {PROJECTS_DIR}")
+
 
 # ── Default feature flags ─────────────────────────────────────────────────────
 _DEFAULT_FEATURE_FLAGS = {
@@ -120,7 +150,6 @@ def _gcs_delete_blob(path: str):
         blob.delete()
 
 def _gcs_blob_metadata(gcs_path: str) -> Optional[dict]:
-    """Return size and updated timestamp for a GCS blob, or None if not found."""
     blob = _gcs_blob(gcs_path)
     if not blob.exists():
         return None
@@ -139,19 +168,19 @@ def _gcs_blob_metadata(gcs_path: str) -> Optional[dict]:
 def create_project(name: str, **meta_kwargs) -> dict:
     project_id = str(uuid.uuid4())
     meta = {
-        "project_id":    project_id,
-        "name":          name,
-        "created_at":    datetime.now(timezone.utc).isoformat(),
-        "status":        "created",
-        "rfp_filename":  None,
+        "project_id":     project_id,
+        "name":           name,
+        "created_at":     datetime.now(timezone.utc).isoformat(),
+        "status":         "created",
+        "rfp_filename":   None,
         "supplier_count": 0,
-        "category":      meta_kwargs.get("category"),
-        "description":   meta_kwargs.get("description"),
-        "stakeholders":  meta_kwargs.get("stakeholders"),
-        "timeline":      meta_kwargs.get("timeline"),
-        "budget":        meta_kwargs.get("budget"),
-        "currency":      meta_kwargs.get("currency"),
-        "module_states": dict(_DEFAULT_MODULE_STATES),
+        "category":       meta_kwargs.get("category"),
+        "description":    meta_kwargs.get("description"),
+        "stakeholders":   meta_kwargs.get("stakeholders"),
+        "timeline":       meta_kwargs.get("timeline"),
+        "budget":         meta_kwargs.get("budget"),
+        "currency":       meta_kwargs.get("currency"),
+        "module_states":  dict(_DEFAULT_MODULE_STATES),
     }
     if _gcs_enabled:
         _gcs_write_json(f"projects/{project_id}/project.json", meta)
@@ -257,6 +286,7 @@ def save_rfp_file(project_id: str, filename: str, data: bytes) -> Path:
         _gcs_upload_file(f"projects/{project_id}/rfp/{filename}", data)
     return local_path
 
+
 def save_supplier_file(project_id: str, filename: str, data: bytes) -> Path:
     local_path = PROJECTS_DIR / project_id / "suppliers" / filename
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +294,7 @@ def save_supplier_file(project_id: str, filename: str, data: bytes) -> Path:
     if _gcs_enabled:
         _gcs_upload_file(f"projects/{project_id}/suppliers/{filename}", data)
     return local_path
+
 
 def save_metadata(project_id: str, filename: str, data) -> Path:
     local_path = PROJECTS_DIR / project_id / "metadata" / filename
@@ -276,9 +307,10 @@ def save_metadata(project_id: str, filename: str, data) -> Path:
             _gcs_upload_file(
                 f"projects/{project_id}/metadata/{filename}",
                 json.dumps(data, indent=2).encode(),
-                content_type="application/json"
+                content_type="application/json",
             )
     return local_path
+
 
 def load_metadata(project_id: str, filename: str) -> Optional[dict]:
     local_path = PROJECTS_DIR / project_id / "metadata" / filename
@@ -292,6 +324,7 @@ def load_metadata(project_id: str, filename: str) -> Optional[dict]:
         return data
     return None
 
+
 def ensure_rfp_local(project_id: str) -> Optional[Path]:
     local = get_rfp_path(project_id)
     if local and local.exists():
@@ -302,11 +335,12 @@ def ensure_rfp_local(project_id: str) -> Optional[Path]:
     rfp_blobs = [b for b in blobs if not b.endswith("/")]
     if not rfp_blobs:
         return None
-    gcs_path  = rfp_blobs[0]
-    filename  = gcs_path.split("/")[-1]
+    gcs_path   = rfp_blobs[0]
+    filename   = gcs_path.split("/")[-1]
     local_path = PROJECTS_DIR / project_id / "rfp" / filename
     _gcs_download_to_local(gcs_path, local_path)
     return local_path
+
 
 def ensure_suppliers_local(project_id: str) -> list[Path]:
     local_paths = get_supplier_paths(project_id)
@@ -325,6 +359,7 @@ def ensure_suppliers_local(project_id: str) -> list[Path]:
         result.append(local_path)
     return result
 
+
 def delete_supplier_file(project_id: str, filename: str) -> bool:
     local_path = PROJECTS_DIR / project_id / "suppliers" / filename
     deleted = False
@@ -338,7 +373,6 @@ def delete_supplier_file(project_id: str, filename: str) -> bool:
 
 
 def delete_rfp_file(project_id: str) -> bool:
-    """Remove the RFP file for a project (local + GCS)."""
     local = get_rfp_path(project_id)
     deleted = False
     if local and local.exists():
@@ -354,23 +388,11 @@ def delete_rfp_file(project_id: str) -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW v3.0 — File listing & signed URLs
+# v3.0 — File listing & signed URLs
 # ════════════════════════════════════════════════════════════════════════════
 
 def list_project_files(project_id: str) -> dict:
-    """
-    Return a structured dict of all files stored for this project.
-
-    Returns:
-        {
-          "rfp":       [{"filename": ..., "size": ..., "uploaded_at": ..., "storage": "gcs"|"local"}],
-          "suppliers": [{"filename": ..., "size": ..., "uploaded_at": ..., "storage": ...,
-                          "display_name": ...}],
-          "storage_backend": "gcs" | "local"
-        }
-    """
     supplier_meta = load_metadata(project_id, "suppliers.json") or {}
-    # Build reverse map: filename -> display_name
     display_names: dict[str, str] = {}
     for path_key, dname in supplier_meta.items():
         display_names[Path(path_key).name] = dname
@@ -383,26 +405,16 @@ def list_project_files(project_id: str) -> dict:
         for gcs_path in rfp_blobs:
             fname = gcs_path.split("/")[-1]
             bmeta = _gcs_blob_metadata(gcs_path) or {}
-            rfp_files.append({
-                "filename":    fname,
-                "size":        bmeta.get("size"),
-                "uploaded_at": bmeta.get("updated"),
-                "gcs_path":    gcs_path,
-                "storage":     "gcs",
-            })
+            rfp_files.append({"filename": fname, "size": bmeta.get("size"),
+                              "uploaded_at": bmeta.get("updated"), "gcs_path": gcs_path, "storage": "gcs"})
 
         sup_files = []
         for gcs_path in sup_blobs:
             fname = gcs_path.split("/")[-1]
             bmeta = _gcs_blob_metadata(gcs_path) or {}
-            sup_files.append({
-                "filename":     fname,
-                "display_name": display_names.get(fname, fname),
-                "size":         bmeta.get("size"),
-                "uploaded_at":  bmeta.get("updated"),
-                "gcs_path":     gcs_path,
-                "storage":      "gcs",
-            })
+            sup_files.append({"filename": fname, "display_name": display_names.get(fname, fname),
+                              "size": bmeta.get("size"), "uploaded_at": bmeta.get("updated"),
+                              "gcs_path": gcs_path, "storage": "gcs"})
 
         return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "gcs"}
     else:
@@ -414,55 +426,37 @@ def list_project_files(project_id: str) -> dict:
             for f in rfp_dir.iterdir():
                 if f.is_file():
                     st = f.stat()
-                    rfp_files.append({
-                        "filename":    f.name,
-                        "size":        st.st_size,
-                        "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
-                        "storage":     "local",
-                    })
+                    rfp_files.append({"filename": f.name, "size": st.st_size,
+                                      "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                                      "storage": "local"})
 
         sup_files = []
         if sup_dir.exists():
             for f in sup_dir.iterdir():
                 if f.is_file():
                     st = f.stat()
-                    sup_files.append({
-                        "filename":     f.name,
-                        "display_name": display_names.get(f.name, f.name),
-                        "size":         st.st_size,
-                        "uploaded_at":  datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
-                        "storage":      "local",
-                    })
+                    sup_files.append({"filename": f.name, "display_name": display_names.get(f.name, f.name),
+                                      "size": st.st_size,
+                                      "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                                      "storage": "local"})
 
         return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "local"}
 
 
 def get_signed_url(project_id: str, role: str, filename: str, expiry_minutes: int = 60) -> Optional[str]:
-    """
-    Generate a time-limited download URL for a stored project file.
-
-    role: "rfp" | "supplier"
-    Returns:
-      - GCS signed URL (valid for expiry_minutes) when GCS is active
-      - None when using local storage (caller should serve file directly)
-    """
     if role not in ("rfp", "suppliers"):
         role = "suppliers" if role == "supplier" else role
     gcs_path = f"projects/{project_id}/{role}/{filename}"
-
     if _gcs_enabled:
         blob = _gcs_blob(gcs_path)
         if not blob.exists():
             return None
-        url = blob.generate_signed_url(
+        return blob.generate_signed_url(
             expiration=timedelta(minutes=expiry_minutes),
             method="GET",
             version="v4",
         )
-        return url
-    else:
-        # For local storage, return a relative API path the caller can proxy
-        return None
+    return None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -476,9 +470,11 @@ def get_rfp_path(project_id: str) -> Optional[Path]:
     files = [f for f in rfp_dir.iterdir() if f.is_file()]
     return files[0] if files else None
 
+
 def _get_rfp_filename_local(project_id: str) -> Optional[str]:
     p = get_rfp_path(project_id)
     return p.name if p else None
+
 
 def get_supplier_paths(project_id: str) -> list[Path]:
     sup_dir = PROJECTS_DIR / project_id / "suppliers"
@@ -486,11 +482,14 @@ def get_supplier_paths(project_id: str) -> list[Path]:
         return []
     return [f for f in sup_dir.iterdir() if f.is_file()]
 
+
 def get_questions_path(project_id: str) -> Path:
     return PROJECTS_DIR / project_id / "metadata" / "questions.json"
 
+
 def get_suppliers_meta_path(project_id: str) -> Path:
     return PROJECTS_DIR / project_id / "metadata" / "suppliers.json"
+
 
 def is_gcs_enabled() -> bool:
     return _gcs_enabled
