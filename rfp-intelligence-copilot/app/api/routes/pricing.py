@@ -32,9 +32,10 @@ _executor      = ThreadPoolExecutor(max_workers=4)
 _api_semaphore = asyncio.Semaphore(2)
 
 
-# ── Request / Response models ─────────────────────────────────────────────
+# ── Request / Response models ────────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
-    rfp_id: str
+    rfp_id:     str
+    project_id: Optional[str] = None   # ← NEW: forward project context
 
 class PricingCorrectionRequest(BaseModel):
     rfp_id: str
@@ -52,7 +53,7 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────────
 def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
     last_err = None
     delay = base_delay
@@ -71,7 +72,7 @@ def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
 
 
 def _load_supplier_names(rfp_id: str) -> dict:
-    """Load file_path -> supplier_name mapping saved during upload."""
+    """Load file_path -> supplier_name mapping saved during upload (legacy path)."""
     meta_path = META_DIR / f"{rfp_id}_suppliers.json"
     if meta_path.exists():
         return json.loads(meta_path.read_text())
@@ -83,25 +84,65 @@ def _run_in_thread(fn, *args):
     return loop.run_in_executor(_executor, fn, *args)
 
 
-# ── Background job ───────────────────────────────────────────────────────────────
-async def _run_pricing_job(rfp_id: str, job_id: str):
+# ── Background job ────────────────────────────────────────────────────────────────
+async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
     job_store.set_running(job_id)
     try:
-        supplier_files = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
+        # ── Resolve files: project-store path takes priority over legacy uploads dir ──
+        rfp_path       = None
+        supplier_files = []
+        name_map       = {}
+
+        if project_id:
+            try:
+                from app.services.project_store import (
+                    ensure_rfp_local,
+                    ensure_suppliers_local,
+                    load_metadata,
+                )
+                rfp_path       = ensure_rfp_local(project_id)
+                supplier_files = ensure_suppliers_local(project_id)
+                name_map       = load_metadata(project_id, "suppliers.json") or {}
+            except Exception as proj_err:
+                # Fall through to legacy path on any import / resolution error
+                rfp_path       = None
+                supplier_files = []
+                name_map       = {}
+
         if not supplier_files:
-            job_store.set_failed(job_id, "No supplier files found. Upload supplier responses first.")
+            # Legacy (non-project) path
+            rfp_files      = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
+            rfp_path       = rfp_files[0] if rfp_files else None
+            supplier_files = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
+            name_map       = _load_supplier_names(rfp_id)
+
+        if not supplier_files:
+            job_store.set_failed(
+                job_id,
+                "No supplier files found. Upload supplier responses first."
+            )
             return
 
-        # Load name map saved at upload time
-        name_map = _load_supplier_names(rfp_id)
+        # ── Parse RFP to get full template text (column context for LLM) ────────
+        rfp_full_text = ""
+        if rfp_path and Path(str(rfp_path)).exists():
+            try:
+                rfp_doc = await _run_in_thread(
+                    _call_with_retry, parse_document, str(rfp_path)
+                )
+                rfp_full_text = rfp_doc.get("full_text", "")
+            except Exception:
+                rfp_full_text = ""
 
+        # ── Extract pricing from each supplier document ──────────────────────
         suppliers_pricing = []
         for sf in supplier_files:
-            # Resolve supplier name: saved map > original filename stem > uuid chunk
+            sf_path = Path(str(sf))
+            # Resolve supplier display name
             supplier_name = (
                 name_map.get(str(sf))
-                or name_map.get(sf.name)
-                or sf.stem.split("_supplier_")[-1]  # uuid fallback
+                or name_map.get(sf_path.name)
+                or sf_path.stem.split("_supplier_")[-1]
             )
 
             async with _api_semaphore:
@@ -109,18 +150,18 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
                     _call_with_retry, parse_document, str(sf)
                 )
 
-            # Pass the rich full_text from parse_document directly into pricing extractor
-            # This ensures LLM fallback receives proper text (not a re-parse)
             full_text = parsed.get("full_text", "")
 
             pricing = extract_pricing_from_document(
-                str(sf), supplier_name, full_text
+                str(sf),
+                supplier_name,
+                full_text,
+                rfp_full_text=rfp_full_text,   # ← FIX: pass RFP template context
             )
             suppliers_pricing.append(pricing)
-
             await asyncio.sleep(1)
 
-        result = run_pricing_analysis(suppliers_pricing)
+        result          = run_pricing_analysis(suppliers_pricing)
         result["rfp_id"] = rfp_id
 
         result_path = META_DIR / f"{rfp_id}_pricing.json"
@@ -133,11 +174,16 @@ async def _run_pricing_job(rfp_id: str, job_id: str):
         job_store.set_failed(job_id, str(e))
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ── Routes ──────────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=JobStartResponse)
 async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: BackgroundTasks):
     job_id = job_store.create()
-    background_tasks.add_task(_run_pricing_job, req.rfp_id, job_id)
+    background_tasks.add_task(
+        _run_pricing_job,
+        req.rfp_id,
+        job_id,
+        req.project_id,   # ← FIX: forward project_id
+    )
     return JobStartResponse(job_id=job_id, status=JobStatus.PENDING)
 
 
@@ -158,7 +204,10 @@ async def get_pricing_status(job_id: str):
 async def get_pricing_result(rfp_id: str):
     result_path = META_DIR / f"{rfp_id}_pricing.json"
     if not result_path.exists():
-        raise HTTPException(status_code=404, detail="No pricing result found. Run /pricing/analyze first.")
+        raise HTTPException(
+            status_code=404,
+            detail="No pricing result found. Run /pricing/analyze first.",
+        )
     return json.loads(result_path.read_text())
 
 
@@ -279,23 +328,23 @@ async def export_pricing(rfp_id: str, format: str = "xlsx"):
     ws2.column_dimensions["A"].width = 40
     ws2.column_dimensions["B"].width = 20
 
-    if result.get("market_basket_2", {}).get("best"):
+    if result.get("market_basket_2", {}).get("per_category", {}).get("best"):
         ws3  = wb.create_sheet("Market Basket (2 Suppliers)")
-        best = result["market_basket_2"]["best"]
+        best = result["market_basket_2"]["per_category"]["best"]
         ws3.append(["Category", "Awarded To", "Cost"])
         hdr(ws3)
-        for cat, detail in best.get("category_detail", {}).items():
+        for cat, detail in best.get("allocation", {}).items():
             ws3.append([cat, detail["awarded_to"], detail["cost"]])
         ws3.append(["", "TOTAL", best["total_cost"]])
         ws3.column_dimensions["A"].width = 25
         ws3.column_dimensions["B"].width = 25
 
-    if result.get("market_basket_3", {}).get("best"):
+    if result.get("market_basket_3", {}).get("per_category", {}).get("best"):
         ws4  = wb.create_sheet("Market Basket (3 Suppliers)")
-        best = result["market_basket_3"]["best"]
+        best = result["market_basket_3"]["per_category"]["best"]
         ws4.append(["Category", "Awarded To", "Cost"])
         hdr(ws4)
-        for cat, detail in best.get("category_detail", {}).items():
+        for cat, detail in best.get("allocation", {}).items():
             ws4.append([cat, detail["awarded_to"], detail["cost"]])
         ws4.append(["", "TOTAL", best["total_cost"]])
         ws4.column_dimensions["A"].width = 25
