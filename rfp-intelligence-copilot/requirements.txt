@@ -7,3 +7,6 @@ python-docx
 httpx
 openai
 boto3>=1.34.0      # S3/R2 storage (optional — only needed if STORAGE_BACKEND=s3 or r2)
+# Database ORM
+sqlmodel>=0.0.18
+sqlalchemy>=2.0.0
