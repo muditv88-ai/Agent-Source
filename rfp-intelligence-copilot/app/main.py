@@ -1,9 +1,9 @@
 """
-main.py  v4.3
+main.py  v5.0
 
-Fix: router prefix alignment with frontend api.ts calls.
-  - pricing_router:  /pricing        → /pricing-analysis
-  - analysis_router: /analysis       → /technical-analysis
+Adds:
+  - /files router  — GCS-backed persistent project file library
+    (RFP templates + supplier responses stored once, reusable)
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from app.api.routes.chat           import router as chat_router
 from app.api.routes.communications import router as communications_router
 from app.api.routes.suppliers      import router as suppliers_router
 from app.api.routes.drawings       import router as drawings_router
+from app.api.routes.files          import router as files_router
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────
@@ -48,8 +49,8 @@ ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 # ── App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RFP Intelligence Copilot",
-    version="4.3.0",
-    description="AI-powered procurement automation — RFP generation, bid evaluation, supplier onboarding.",
+    version="5.0.0",
+    description="AI-powered procurement automation — RFP generation, bid evaluation, supplier onboarding, persistent GCS file library.",
     lifespan=lifespan,
 )
 
@@ -72,15 +73,16 @@ app.include_router(health_router,         prefix="/health",             tags=["H
 app.include_router(auth_router,           prefix="/auth",               tags=["Auth"])
 app.include_router(projects_router,       prefix="/projects",           tags=["Projects"])
 app.include_router(rfp_router,            prefix="/rfp",                tags=["RFP"])
-app.include_router(analysis_router,       prefix="/technical-analysis", tags=["Analysis"])  # was /analysis
-app.include_router(pricing_router,        prefix="/pricing-analysis",   tags=["Pricing"])   # was /pricing
+app.include_router(analysis_router,       prefix="/technical-analysis", tags=["Analysis"])
+app.include_router(pricing_router,        prefix="/pricing-analysis",   tags=["Pricing"])
 app.include_router(scenarios_router,      prefix="/scenarios",          tags=["Scenarios"])
 app.include_router(chat_router,           prefix="/chat",               tags=["Chat"])
 app.include_router(communications_router, prefix="/communications",     tags=["Communications"])
 app.include_router(suppliers_router,      prefix="/suppliers",          tags=["Suppliers"])
 app.include_router(drawings_router,       prefix="/drawings",           tags=["Drawings"])
+app.include_router(files_router,          prefix="/files",              tags=["Files"])
 
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "version": "4.3.0", "service": "RFP Intelligence Copilot"}
+    return {"status": "ok", "version": "5.0.0", "service": "RFP Intelligence Copilot"}
