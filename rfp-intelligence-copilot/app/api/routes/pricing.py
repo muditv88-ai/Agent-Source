@@ -7,6 +7,15 @@ Endpoints:
   GET  /pricing/result/{rfp_id} — get latest result
   POST /pricing/correct         — apply user correction to detected structure
   GET  /pricing/export/{rfp_id} — export pricing analysis as xlsx/csv
+
+FIX (2026-04-01):
+  - extract_pricing_from_document is CPU/IO-bound and was being called
+    synchronously inside an async function, blocking FastAPI's event loop.
+    Wrapped in loop.run_in_executor so the event loop stays free and
+    set_completed() is always reached.
+  - Replaced asyncio.get_event_loop() with asyncio.get_running_loop()
+    (get_event_loop() is deprecated in Python 3.10+ and raises DeprecationWarning;
+    can also return a closed loop in background-task context).
 """
 import json
 import asyncio
@@ -32,7 +41,7 @@ _executor      = ThreadPoolExecutor(max_workers=4)
 _api_semaphore = asyncio.Semaphore(2)
 
 
-# ── Request / Response models ──────────────────────────────────────────
+# ── Request / Response models ──────────────────────────────────────────────────────────────────
 class PricingAnalyzeRequest(BaseModel):
     rfp_id:     str
     project_id: Optional[str] = None
@@ -53,7 +62,7 @@ class JobStatusResponse(BaseModel):
     error:  Optional[str]  = None
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────────────────
 def _call_with_retry(fn, *args, max_retries: int = 4, base_delay: float = 15.0):
     last_err = None
     delay = base_delay
@@ -79,12 +88,14 @@ def _load_supplier_names(rfp_id: str) -> dict:
     return {}
 
 
-def _run_in_thread(fn, *args):
-    loop = asyncio.get_event_loop()
-    return loop.run_in_executor(_executor, fn, *args)
+async def _run_in_thread(fn, *args):
+    """Run a blocking function in the thread pool without blocking the event loop."""
+    # FIX: use get_running_loop() — get_event_loop() is deprecated in Python 3.10+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, fn, *args)
 
 
-# ── Background job ──────────────────────────────────────────────────────────────
+# ── Background job ────────────────────────────────────────────────────────────────────────────
 async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
     job_store.set_running(job_id)
     try:
@@ -93,9 +104,6 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
         name_map       = {}
 
         if project_id:
-            # — Primary path: read directly from project_store disk layout —
-            # projects/{project_id}/suppliers/  and  projects/{project_id}/rfp/
-            # This works regardless of whether GCS is configured.
             from app.services.project_store import (
                 get_rfp_path,
                 get_supplier_paths,
@@ -104,11 +112,9 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
                 ensure_suppliers_local,
             )
 
-            # Files are on local disk (saved there on upload in all modes)
             rfp_path       = get_rfp_path(project_id)
             supplier_files = get_supplier_paths(project_id)
 
-            # If local disk is empty AND GCS is configured, pull files down first
             if not supplier_files:
                 try:
                     ensure_suppliers_local(project_id)
@@ -122,11 +128,9 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
                 except Exception:
                     pass
 
-            # Load supplier display-name map (filename → name)
             name_map = load_metadata(project_id, "suppliers.json") or {}
 
         if not supplier_files:
-            # Legacy (non-project) path — files were uploaded to uploads/ directly
             rfp_files      = list(UPLOAD_DIR.glob(f"{rfp_id}_rfp*"))
             rfp_path       = rfp_files[0] if rfp_files else None
             supplier_files = list(UPLOAD_DIR.glob(f"{rfp_id}_supplier_*"))
@@ -162,8 +166,6 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
                 or sf_path.stem.split("_supplier_")[-1]
             )
 
-            # For project-based uploads, metadata is stored as
-            # { filename: { name: "Display Name" } } or { filename: "Display Name" }
             if isinstance(name_map.get(sf_path.name), dict):
                 supplier_name = name_map[sf_path.name].get("name", supplier_name)
 
@@ -174,11 +176,15 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
 
             full_text = parsed.get("full_text", "")
 
-            pricing = extract_pricing_from_document(
+            # FIX: extract_pricing_from_document is CPU/IO-bound.
+            # Must run in executor — calling it directly blocks the event loop
+            # and prevents set_completed() from ever being reached.
+            pricing = await _run_in_thread(
+                extract_pricing_from_document,
                 str(sf),
                 supplier_name,
                 full_text,
-                rfp_full_text=rfp_full_text,
+                rfp_full_text,
             )
             suppliers_pricing.append(pricing)
             await asyncio.sleep(1)
@@ -196,7 +202,7 @@ async def _run_pricing_job(rfp_id: str, job_id: str, project_id: str = None):
         job_store.set_failed(job_id, str(e))
 
 
-# ── Routes ──────────────────────────────────────────────────────────────────
+# ── Routes ──────────────────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=JobStartResponse)
 async def analyze_pricing(req: PricingAnalyzeRequest, background_tasks: BackgroundTasks):
     job_id = job_store.create()

@@ -36,7 +36,7 @@ UPLOAD_DIR = Path("uploads")
 META_DIR   = Path("metadata")
 
 
-# ── File resolution ────────────────────────────────────────────────────────────
+# ── File resolution ──────────────────────────────────────────────────────────────────────────────
 
 def _resolve_rfp_files(rfp_id: str, project_id: str = None):
     if project_id:
@@ -59,7 +59,7 @@ def _resolve_rfp_files(rfp_id: str, project_id: str = None):
         return rfp_path, supplier_paths, questions_path, supplier_names
 
 
-# ── Per-supplier analysis (runs in thread) ──────────────────────────────────────────
+# ── Per-supplier analysis (runs in thread) ────────────────────────────────────────────────────────
 
 def _analyse_one_supplier(
     sup: dict,
@@ -88,7 +88,7 @@ def _analyse_one_supplier(
     split            = compute_split_scores(category_results, tech_weight, commercial_weight)
     flagged_count    = sum(1 for s in question_scores.values() if s.get("flagged"))
 
-    # ── Price extraction ───────────────────────────────────────────────────────────
+    # ── Price extraction ─────────────────────────────────────────────────────────────────────────
     # Use the full document text (not just answer snippets) so the pricing
     # sheet / commercial table is always included in the extraction pass.
     pricing_text = full_text or " ".join(answers.values())
@@ -117,7 +117,7 @@ def _analyse_one_supplier(
     }
 
 
-# ── Main analysis orchestrator ───────────────────────────────────────────────────────────
+# ── Main analysis orchestrator ──────────────────────────────────────────────────────────────────────────────
 
 def _do_analysis(
     rfp_id: str,
@@ -259,7 +259,7 @@ async def _run_analysis_job(
         job_store.set_failed(job_id, f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 
-# ── Routes ──────────────────────────────────────────────────────────────
+# ── Routes ───────────────────────────────────────────────────────────────────
 
 @router.post("/run")
 async def run_analysis(req: AnalysisRequest, background_tasks: BackgroundTasks):
@@ -290,9 +290,10 @@ async def export_analysis(rfp_id: str, format: str = "json"):
     export_dir = Path("exports")
     export_dir.mkdir(exist_ok=True)
     if format == "json":
+        # FIX: was job_store._store (wrong attr) — correct attr is _jobs
         job = next(
-            (j for j in job_store._store.values()
-             if j.get("status") == "completed" and
+            (j for j in job_store._jobs.values()
+             if j.get("status") == JobStatus.COMPLETED and
              j.get("result", {}).get("rfp_id") == rfp_id),
             None,
         )
