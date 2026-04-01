@@ -1,8 +1,11 @@
 """
-rfp.py  v4.0  — DB-backed
+rfp.py  v4.1  — GCS file persistence
 
-All TODO stubs replaced with real SQLModel reads/writes via get_db().
-All existing v3 endpoints preserved for backward compatibility.
+Changes from v4.0:
+  - /rfp/extract          → uploads PDF/DOCX to GCS under projects/<id>/rfp_templates/
+  - /rfp/parse-supplier-response → uploads file to GCS under projects/<id>/supplier_responses/
+  - /rfp/upload-supplier-response → same GCS persistence + DB write
+  - gcs_blob key added to all three response payloads (None if GCS not configured)
 """
 from __future__ import annotations
 
@@ -25,7 +28,45 @@ from app.services.supplier_parser import parse_supplier_response
 from app.agents.rfp_generation_agent  import RFPGenerationAgent
 from app.agents.response_intake_agent import ResponseIntakeAgent
 
+# GCS — imported lazily so the app still boots if google-cloud-storage is missing
+try:
+    from app.services import gcs_storage as _gcs
+    _GCS_ENABLED = True
+except Exception:
+    _GCS_ENABLED = False
+
 router = APIRouter()
+
+
+# ── helpers ───────────────────────────────────────────────────────────────
+
+def _save_to_gcs(
+    project_id: Optional[str],
+    category: str,
+    filename: str,
+    file_bytes: bytes,
+    content_type: str,
+) -> Optional[str]:
+    """
+    Upload to GCS and return the blob name.
+    Returns None (without raising) if GCS is not configured or upload fails,
+    so the rest of the request always succeeds.
+    """
+    if not _GCS_ENABLED:
+        return None
+    try:
+        return _gcs.upload_file(
+            project_id=project_id or "unassigned",
+            category=category,
+            filename=filename,
+            file_bytes=file_bytes,
+            content_type=content_type or "application/octet-stream",
+        )
+    except Exception as exc:
+        # Log but never break the request
+        import logging
+        logging.getLogger(__name__).warning("GCS upload failed: %s", exc)
+        return None
 
 
 # ── Pydantic request models ────────────────────────────────────────────────
@@ -43,7 +84,7 @@ class WeightUpdateRequest(BaseModel):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# EXISTING ENDPOINTS (unchanged)
+# EXISTING ENDPOINTS (v4.1 — adds GCS persistence)
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.post("/extract")
@@ -52,6 +93,16 @@ async def extract_rfp(
     project_id: Optional[str]   = Form(None),
 ):
     file_bytes = await file.read()
+
+    # ── GCS: persist the original RFP document ──────────────────────────
+    gcs_blob = _save_to_gcs(
+        project_id=project_id,
+        category="rfp_templates",
+        filename=file.filename,
+        file_bytes=file_bytes,
+        content_type=file.content_type,
+    )
+
     try:
         text = extract_text(file_bytes, file.filename)
     except Exception as e:
@@ -62,8 +113,10 @@ async def extract_rfp(
         result = extract_rfp_questions(text)
     except Exception as e:
         raise HTTPException(500, detail=f"RFP extraction failed: {e}")
-    result["project_id"] = project_id
+
+    result["project_id"]  = project_id
     result["source_file"] = file.filename
+    result["gcs_blob"]    = gcs_blob   # e.g. "projects/abc/rfp_templates/my_rfp.pdf"
     return result
 
 
@@ -74,19 +127,31 @@ async def parse_supplier(
     project_id: Optional[str] = Form(None),
 ):
     file_bytes = await file.read()
+
+    # ── GCS: persist the supplier response document ──────────────────────
+    gcs_blob = _save_to_gcs(
+        project_id=project_id,
+        category="supplier_responses",
+        filename=file.filename,
+        file_bytes=file_bytes,
+        content_type=file.content_type,
+    )
+
     try:
         text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
     except Exception as e:
         raise HTTPException(422, detail=str(e))
+
     result = parse_supplier_response(text, rfp_questions)
     result["project_id"]  = project_id
     result["source_file"] = file.filename
+    result["gcs_blob"]    = gcs_blob
     return result
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v4.0  DB-BACKED ENDPOINTS
+# v4.1  DB-BACKED ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.post("/generate")
@@ -158,18 +223,29 @@ def get_rfp(rfp_id: str, db: Session = Depends(get_db)):
 
 @router.post("/upload-supplier-response")
 async def upload_supplier_response(
-    file:       UploadFile = File(...),
-    project_id: str        = Form(...),
-    questions:  str        = Form(...),
-    rfp_id:     Optional[str] = Form(None),
-    supplier_id: Optional[str] = Form(None),
-    db:         Session    = Depends(get_db),
+    file:        UploadFile       = File(...),
+    project_id:  str              = Form(...),
+    questions:   str              = Form(...),
+    rfp_id:      Optional[str]   = Form(None),
+    supplier_id: Optional[str]   = Form(None),
+    db:          Session          = Depends(get_db),
 ):
     """
     Upload a supplier response. ResponseIntakeAgent maps answers to questions,
     calculates completeness %, and the BidResponse is persisted to DB.
+    The original file is also saved to GCS.
     """
     file_bytes = await file.read()
+
+    # ── GCS: persist the supplier response document ──────────────────────
+    gcs_blob = _save_to_gcs(
+        project_id=project_id,
+        category="supplier_responses",
+        filename=file.filename,
+        file_bytes=file_bytes,
+        content_type=file.content_type,
+    )
+
     try:
         text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
@@ -201,6 +277,7 @@ async def upload_supplier_response(
         result["bid_response_id"] = bid.id
 
     result["source_file"] = file.filename
+    result["gcs_blob"]    = gcs_blob
     return result
 
 
