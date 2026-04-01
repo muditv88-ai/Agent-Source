@@ -12,7 +12,18 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
-      - name: Push to hub
+
+      - name: Push subfolder to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://Muditv88-ai:$HF_TOKEN@huggingface.co/spaces/Muditv88-ai/sourceiq-backend main
+        run: |
+          # Split out only the rfp-intelligence-copilot/ subfolder
+          # so the Dockerfile lands at the root of the HF Space
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+
+          SPLIT_SHA=$(git subtree split --prefix=rfp-intelligence-copilot HEAD)
+
+          git push --force \
+            https://muditv88-ai:$HF_TOKEN@huggingface.co/spaces/muditv88-ai/sourceiq-backend \
+            $SPLIT_SHA:main
