@@ -1,26 +1,23 @@
 """
-project_store.py  v3.1  — dual-backend storage (GCS or local filesystem).
+project_store.py  v3.2  — three-backend storage (GCS | HF Dataset | local).
 
-v3.1 FIX: PROJECTS_DIR is now an absolute path resolved from the DATA_DIR
-environment variable so that project data survives server restarts and
-redeployments on cloud hosts.
+Backend selection via STORAGE_BACKEND env var:
 
-  DATA_DIR  (env)  — root directory for all persistent data.
-                     Default: /app/data  on Linux/Mac,  .\\data  on Windows.
-                     Point this at a mounted persistent volume in production.
+  local  (default)   Pure local filesystem. Use DATA_DIR for persistence.
+                     Fine for local dev and paid HF Spaces with a volume.
 
-  PROJECTS_DIR = DATA_DIR / "projects"   (created automatically)
+  gcs                Google Cloud Storage.
+                     Requires GCS_BUCKET_NAME + GCP credentials.
 
-Set STORAGE_BACKEND=gcs to use Google Cloud Storage instead.
+  hf                 Hugging Face Dataset repo  ← recommended for HF Spaces
+                     Requires HF_TOKEN + HF_REPO_ID secrets in the Space.
+                     Files are written to local DATA_DIR cache AND synced
+                     to the Dataset repo so they survive container restarts.
 
-GCS layout (unchanged):
-  projects/{project_id}/project.json
-  projects/{project_id}/rfp/{filename}
-  projects/{project_id}/suppliers/{filename}
-  projects/{project_id}/metadata/questions.json
-  projects/{project_id}/metadata/suppliers.json
-  projects/{project_id}/metadata/feature_flags.json
-  projects/{project_id}/metadata/audit_log.json
+DATA_DIR env var
+  Root directory for local file cache.
+  Default: /data (HF Spaces / Docker) or ./data (local dev).
+  Always set automatically by the Dockerfile (ENV DATA_DIR=/data).
 """
 import io
 import json
@@ -30,10 +27,12 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-# ── Backend selection ────────────────────────────────────────────────────────
+# ── Backend selection ──────────────────────────────────────────────────────────────
 
 STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "local").lower()
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME", "procureiq-rfp-store")
+
+# ── GCS client ───────────────────────────────────────────────────────────────────
 
 _gcs_client  = None
 _gcs_bucket  = None
@@ -48,43 +47,39 @@ if STORAGE_BACKEND == "gcs":
         _gcs_enabled = True
         print(f"[project_store] GCS backend active: gs://{GCS_BUCKET_NAME}")
     except Exception as e:
-        print(f"[project_store] GCS unavailable ({e}), falling back to local storage")
+        print(f"[project_store] GCS unavailable ({e}), falling back to local")
+        STORAGE_BACKEND = "local"
 
-if not _gcs_enabled:
-    print("[project_store] Using local filesystem storage")
+# ── HF store ───────────────────────────────────────────────────────────────────
 
+_hf = None
+_hf_enabled = False
 
-# ── Persistent local paths ────────────────────────────────────────────────────
-# v3.1: Use an absolute path so data is NOT wiped on restart.
-#
-# Priority order:
-#   1. DATA_DIR env var (set this in production, point at a mounted volume)
-#   2. /app/data          (standard for Docker / Railway / Render / Fly.io)
-#   3. ./data             (local dev fallback)
-#
-# Always use PROJECTS_DIR everywhere in this file — never use Path('projects').
+if STORAGE_BACKEND == "hf":
+    from app.services import hf_store as _hf
+    _hf_enabled = _hf.is_enabled()
+    if not _hf_enabled:
+        print("[project_store] HF backend not ready — falling back to local cache")
+
+# ── Persistent local paths ─────────────────────────────────────────────────────
 
 def _resolve_data_dir() -> Path:
-    """Return an absolute path for the data root. Never ephemeral."""
     env_val = os.environ.get("DATA_DIR", "").strip()
     if env_val:
         return Path(env_val).resolve()
-    # On a real Linux server / Docker container /app exists; use that.
-    # On a dev machine (Mac/Windows) fall back to a local ./data folder.
-    candidate = Path("/app/data")
-    if candidate.parent.exists():   # /app exists → we're in a container
-        return candidate
-    return Path("data").resolve()   # local dev
+    if Path("/app/data").parent.exists():
+        return Path("/app/data")
+    return Path("data").resolve()
 
 
-DATA_DIR: Path = _resolve_data_dir()
+DATA_DIR: Path     = _resolve_data_dir()
 PROJECTS_DIR: Path = DATA_DIR / "projects"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
-print(f"[project_store] PROJECTS_DIR = {PROJECTS_DIR}")
+print(f"[project_store] backend={STORAGE_BACKEND}  PROJECTS_DIR={PROJECTS_DIR}")
 
+# ── Defaults ─────────────────────────────────────────────────────────────────────
 
-# ── Default feature flags ─────────────────────────────────────────────────────
 _DEFAULT_FEATURE_FLAGS = {
     "chatbot_actions":     True,
     "new_analysis_engine": False,
@@ -92,8 +87,6 @@ _DEFAULT_FEATURE_FLAGS = {
     "structured_rfp_view": False,
     "audit_logging":       True,
 }
-
-# ── Default module states ─────────────────────────────────────────────────────
 _DEFAULT_MODULE_STATES = {
     "rfp_state":       "pending",
     "technical_state": "pending",
@@ -102,33 +95,27 @@ _DEFAULT_MODULE_STATES = {
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# GCS helpers
+# GCS helpers (unchanged from v3.1)
 # ════════════════════════════════════════════════════════════════════════════
 
-def _gcs_blob(path: str):
+def _gcs_blob(path):
     return _gcs_bucket.blob(path)
 
-def _gcs_write_json(path: str, data: dict):
+def _gcs_write_json(path, data):
+    _gcs_blob(path).upload_from_string(json.dumps(data, indent=2), content_type="application/json")
+
+def _gcs_read_json(path):
     blob = _gcs_blob(path)
-    blob.upload_from_string(json.dumps(data, indent=2), content_type="application/json")
+    return json.loads(blob.download_as_text()) if blob.exists() else None
 
-def _gcs_read_json(path: str) -> Optional[dict]:
-    blob = _gcs_blob(path)
-    if not blob.exists():
-        return None
-    return json.loads(blob.download_as_text())
+def _gcs_upload_file(gcs_path, local_bytes, content_type="application/octet-stream"):
+    _gcs_blob(gcs_path).upload_from_file(io.BytesIO(local_bytes), content_type=content_type)
 
-def _gcs_upload_file(gcs_path: str, local_bytes: bytes, content_type: str = "application/octet-stream"):
+def _gcs_download_file(gcs_path):
     blob = _gcs_blob(gcs_path)
-    blob.upload_from_file(io.BytesIO(local_bytes), content_type=content_type)
+    return blob.download_as_bytes() if blob.exists() else None
 
-def _gcs_download_file(gcs_path: str) -> Optional[bytes]:
-    blob = _gcs_blob(gcs_path)
-    if not blob.exists():
-        return None
-    return blob.download_as_bytes()
-
-def _gcs_download_to_local(gcs_path: str, local_path: Path) -> bool:
+def _gcs_download_to_local(gcs_path, local_path):
     data = _gcs_download_file(gcs_path)
     if data is None:
         return False
@@ -136,34 +123,47 @@ def _gcs_download_to_local(gcs_path: str, local_path: Path) -> bool:
     local_path.write_bytes(data)
     return True
 
-def _gcs_list_prefix(prefix: str) -> list[str]:
+def _gcs_list_prefix(prefix):
     return [b.name for b in _gcs_bucket.list_blobs(prefix=prefix)]
 
-def _gcs_delete_prefix(prefix: str):
+def _gcs_delete_prefix(prefix):
     blobs = list(_gcs_bucket.list_blobs(prefix=prefix))
     if blobs:
         _gcs_bucket.delete_blobs(blobs)
 
-def _gcs_delete_blob(path: str):
+def _gcs_delete_blob(path):
     blob = _gcs_blob(path)
     if blob.exists():
         blob.delete()
 
-def _gcs_blob_metadata(gcs_path: str) -> Optional[dict]:
+def _gcs_blob_metadata(gcs_path):
     blob = _gcs_blob(gcs_path)
     if not blob.exists():
         return None
     blob.reload()
-    return {
-        "size":         blob.size,
-        "updated":      blob.updated.isoformat() if blob.updated else None,
-        "content_type": blob.content_type,
-    }
+    return {"size": blob.size, "updated": blob.updated.isoformat() if blob.updated else None,
+            "content_type": blob.content_type}
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # Core project CRUD
 # ════════════════════════════════════════════════════════════════════════════
+
+def _local_base(project_id):
+    return PROJECTS_DIR / project_id
+
+def _repo_meta(project_id):
+    return f"projects/{project_id}/project.json"
+
+def _repo_rfp(project_id, filename):
+    return f"projects/{project_id}/rfp/{filename}"
+
+def _repo_supplier(project_id, filename):
+    return f"projects/{project_id}/suppliers/{filename}"
+
+def _repo_meta_file(project_id, filename):
+    return f"projects/{project_id}/metadata/{filename}"
+
 
 def create_project(name: str, **meta_kwargs) -> dict:
     project_id = str(uuid.uuid4())
@@ -183,9 +183,11 @@ def create_project(name: str, **meta_kwargs) -> dict:
         "module_states":  dict(_DEFAULT_MODULE_STATES),
     }
     if _gcs_enabled:
-        _gcs_write_json(f"projects/{project_id}/project.json", meta)
+        _gcs_write_json(_repo_meta(project_id), meta)
+    elif STORAGE_BACKEND == "hf":
+        _hf.write_json(_repo_meta(project_id), meta)
     else:
-        base = PROJECTS_DIR / project_id
+        base = _local_base(project_id)
         (base / "rfp").mkdir(parents=True, exist_ok=True)
         (base / "suppliers").mkdir(exist_ok=True)
         (base / "metadata").mkdir(exist_ok=True)
@@ -195,7 +197,7 @@ def create_project(name: str, **meta_kwargs) -> dict:
 
 def get_project(project_id: str) -> Optional[dict]:
     if _gcs_enabled:
-        data = _gcs_read_json(f"projects/{project_id}/project.json")
+        data = _gcs_read_json(_repo_meta(project_id))
         if not data:
             return None
         rfp_blobs = _gcs_list_prefix(f"projects/{project_id}/rfp/")
@@ -203,53 +205,50 @@ def get_project(project_id: str) -> Optional[dict]:
         data["rfp_filename"] = rfp_files[0] if rfp_files else None
         sup_blobs = _gcs_list_prefix(f"projects/{project_id}/suppliers/")
         data["supplier_count"] = len([b for b in sup_blobs if not b.endswith("/")])
-        data.setdefault("module_states", dict(_DEFAULT_MODULE_STATES))
-        return data
+    elif STORAGE_BACKEND == "hf":
+        data = _hf.read_json(_repo_meta(project_id))
+        if not data:
+            return None
+        rfp_files = [p.split("/")[-1] for p in _hf.list_prefix(f"projects/{project_id}/rfp")]
+        data["rfp_filename"] = rfp_files[0] if rfp_files else None
+        data["supplier_count"] = len(_hf.list_prefix(f"projects/{project_id}/suppliers"))
     else:
-        path = PROJECTS_DIR / project_id / "project.json"
+        path = _local_base(project_id) / "project.json"
         if not path.exists():
             return None
         data = json.loads(path.read_text())
         data["rfp_filename"] = _get_rfp_filename_local(project_id)
         data["supplier_count"] = len(get_supplier_paths(project_id))
-        data.setdefault("module_states", dict(_DEFAULT_MODULE_STATES))
-        return data
+    data.setdefault("module_states", dict(_DEFAULT_MODULE_STATES))
+    return data
 
 
 def list_projects() -> list:
     if _gcs_enabled:
         blobs = _gcs_list_prefix("projects/")
-        project_ids = set()
-        for b in blobs:
-            parts = b.split("/")
-            if len(parts) >= 3 and parts[2] == "project.json":
-                project_ids.add(parts[1])
-        results = []
-        for pid in project_ids:
-            proj = get_project(pid)
-            if proj:
-                results.append(proj)
-        results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
-        return results
+        pids = {b.split("/")[1] for b in blobs if len(b.split("/")) >= 3 and b.split("/")[2] == "project.json"}
+    elif STORAGE_BACKEND == "hf":
+        paths = _hf.list_prefix("projects")
+        pids = {p.split("/")[1] for p in paths if len(p.split("/")) >= 3 and p.split("/")[2] == "project.json"}
     else:
-        results = []
-        if not PROJECTS_DIR.exists():
-            return results
-        for p in sorted(PROJECTS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-            if p.is_dir() and (p / "project.json").exists():
-                proj = get_project(p.name)
-                if proj:
-                    results.append(proj)
-        return results
+        pids = [p.name for p in sorted(PROJECTS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True)
+                if p.is_dir() and (p / "project.json").exists()] if PROJECTS_DIR.exists() else []
+    results = [proj for pid in pids if (proj := get_project(pid))]
+    results.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    return results
 
 
 def update_project_meta(project_id: str, **kwargs) -> None:
     if _gcs_enabled:
-        data = _gcs_read_json(f"projects/{project_id}/project.json") or {}
+        data = _gcs_read_json(_repo_meta(project_id)) or {}
         data.update(kwargs)
-        _gcs_write_json(f"projects/{project_id}/project.json", data)
+        _gcs_write_json(_repo_meta(project_id), data)
+    elif STORAGE_BACKEND == "hf":
+        data = _hf.read_json(_repo_meta(project_id)) or {}
+        data.update(kwargs)
+        _hf.write_json(_repo_meta(project_id), data)
     else:
-        path = PROJECTS_DIR / project_id / "project.json"
+        path = _local_base(project_id) / "project.json"
         if not path.exists():
             return
         data = json.loads(path.read_text())
@@ -264,14 +263,15 @@ def update_project_status(project_id: str, status: str) -> None:
 def delete_project(project_id: str) -> bool:
     if _gcs_enabled:
         _gcs_delete_prefix(f"projects/{project_id}/")
-        return True
+    elif STORAGE_BACKEND == "hf":
+        _hf.delete_prefix(f"projects/{project_id}")
     else:
         import shutil
-        base = PROJECTS_DIR / project_id
+        base = _local_base(project_id)
         if not base.exists():
             return False
         shutil.rmtree(base)
-        return True
+    return True
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -284,6 +284,8 @@ def save_rfp_file(project_id: str, filename: str, data: bytes) -> Path:
     local_path.write_bytes(data)
     if _gcs_enabled:
         _gcs_upload_file(f"projects/{project_id}/rfp/{filename}", data)
+    elif STORAGE_BACKEND == "hf":
+        _hf.write_bytes(_repo_rfp(project_id, filename), data)
     return local_path
 
 
@@ -293,6 +295,8 @@ def save_supplier_file(project_id: str, filename: str, data: bytes) -> Path:
     local_path.write_bytes(data)
     if _gcs_enabled:
         _gcs_upload_file(f"projects/{project_id}/suppliers/{filename}", data)
+    elif STORAGE_BACKEND == "hf":
+        _hf.write_bytes(_repo_supplier(project_id, filename), data)
     return local_path
 
 
@@ -304,11 +308,10 @@ def save_metadata(project_id: str, filename: str, data) -> Path:
         if isinstance(data, (dict, list)):
             _gcs_write_json(f"projects/{project_id}/metadata/{filename}", data)
         else:
-            _gcs_upload_file(
-                f"projects/{project_id}/metadata/{filename}",
-                json.dumps(data, indent=2).encode(),
-                content_type="application/json",
-            )
+            _gcs_upload_file(f"projects/{project_id}/metadata/{filename}",
+                             json.dumps(data, indent=2).encode(), content_type="application/json")
+    elif STORAGE_BACKEND == "hf":
+        _hf.write_json(_repo_meta_file(project_id, filename), data)
     return local_path
 
 
@@ -322,6 +325,8 @@ def load_metadata(project_id: str, filename: str) -> Optional[dict]:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text(json.dumps(data, indent=2))
         return data
+    if STORAGE_BACKEND == "hf":
+        return _hf.read_json(_repo_meta_file(project_id, filename))
     return None
 
 
@@ -329,99 +334,114 @@ def ensure_rfp_local(project_id: str) -> Optional[Path]:
     local = get_rfp_path(project_id)
     if local and local.exists():
         return local
-    if not _gcs_enabled:
-        return None
-    blobs = _gcs_list_prefix(f"projects/{project_id}/rfp/")
-    rfp_blobs = [b for b in blobs if not b.endswith("/")]
-    if not rfp_blobs:
-        return None
-    gcs_path   = rfp_blobs[0]
-    filename   = gcs_path.split("/")[-1]
-    local_path = PROJECTS_DIR / project_id / "rfp" / filename
-    _gcs_download_to_local(gcs_path, local_path)
-    return local_path
+    if _gcs_enabled:
+        blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/rfp/") if not b.endswith("/")]
+        if not blobs:
+            return None
+        gcs_path   = blobs[0]
+        filename   = gcs_path.split("/")[-1]
+        local_path = PROJECTS_DIR / project_id / "rfp" / filename
+        _gcs_download_to_local(gcs_path, local_path)
+        return local_path
+    if STORAGE_BACKEND == "hf":
+        paths = _hf.list_prefix(f"projects/{project_id}/rfp")
+        if not paths:
+            return None
+        repo_path  = paths[0]
+        filename   = repo_path.split("/")[-1]
+        local_path = PROJECTS_DIR / project_id / "rfp" / filename
+        data = _hf.read_bytes(repo_path)
+        if data:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(data)
+            return local_path
+    return None
 
 
 def ensure_suppliers_local(project_id: str) -> list[Path]:
     local_paths = get_supplier_paths(project_id)
     if local_paths:
         return local_paths
-    if not _gcs_enabled:
-        return []
-    blobs = _gcs_list_prefix(f"projects/{project_id}/suppliers/")
-    sup_blobs = [b for b in blobs if not b.endswith("/")]
-    result = []
-    for gcs_path in sup_blobs:
-        filename   = gcs_path.split("/")[-1]
-        local_path = PROJECTS_DIR / project_id / "suppliers" / filename
-        if not local_path.exists():
-            _gcs_download_to_local(gcs_path, local_path)
-        result.append(local_path)
-    return result
+    if _gcs_enabled:
+        blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/suppliers/") if not b.endswith("/")]
+        result = []
+        for gcs_path in blobs:
+            filename   = gcs_path.split("/")[-1]
+            local_path = PROJECTS_DIR / project_id / "suppliers" / filename
+            if not local_path.exists():
+                _gcs_download_to_local(gcs_path, local_path)
+            result.append(local_path)
+        return result
+    if STORAGE_BACKEND == "hf":
+        paths = _hf.list_prefix(f"projects/{project_id}/suppliers")
+        result = []
+        for repo_path in paths:
+            filename   = repo_path.split("/")[-1]
+            local_path = PROJECTS_DIR / project_id / "suppliers" / filename
+            if not local_path.exists():
+                data = _hf.read_bytes(repo_path)
+                if data:
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_path.write_bytes(data)
+            result.append(local_path)
+        return result
+    return []
 
 
 def delete_supplier_file(project_id: str, filename: str) -> bool:
     local_path = PROJECTS_DIR / project_id / "suppliers" / filename
-    deleted = False
     if local_path.exists():
         local_path.unlink()
-        deleted = True
     if _gcs_enabled:
         _gcs_delete_blob(f"projects/{project_id}/suppliers/{filename}")
-        deleted = True
-    return deleted
+    elif STORAGE_BACKEND == "hf":
+        _hf.delete_file(_repo_supplier(project_id, filename))
+    return True
 
 
 def delete_rfp_file(project_id: str) -> bool:
     local = get_rfp_path(project_id)
-    deleted = False
     if local and local.exists():
         local.unlink()
-        deleted = True
     if _gcs_enabled:
-        blobs = _gcs_list_prefix(f"projects/{project_id}/rfp/")
-        for b in blobs:
+        for b in _gcs_list_prefix(f"projects/{project_id}/rfp/"):
             if not b.endswith("/"):
                 _gcs_delete_blob(b)
-                deleted = True
-    return deleted
+    elif STORAGE_BACKEND == "hf":
+        for rp in _hf.list_prefix(f"projects/{project_id}/rfp"):
+            _hf.delete_file(rp)
+    return True
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# v3.0 — File listing & signed URLs
+# File listing
 # ════════════════════════════════════════════════════════════════════════════
 
 def list_project_files(project_id: str) -> dict:
-    supplier_meta = load_metadata(project_id, "suppliers.json") or {}
-    display_names: dict[str, str] = {}
-    for path_key, dname in supplier_meta.items():
-        display_names[Path(path_key).name] = dname
+    supplier_meta  = load_metadata(project_id, "suppliers.json") or {}
+    display_names  = {Path(k).name: v for k, v in supplier_meta.items()}
 
     if _gcs_enabled:
         rfp_blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/rfp/") if not b.endswith("/")]
         sup_blobs = [b for b in _gcs_list_prefix(f"projects/{project_id}/suppliers/") if not b.endswith("/")]
-
-        rfp_files = []
-        for gcs_path in rfp_blobs:
-            fname = gcs_path.split("/")[-1]
-            bmeta = _gcs_blob_metadata(gcs_path) or {}
-            rfp_files.append({"filename": fname, "size": bmeta.get("size"),
-                              "uploaded_at": bmeta.get("updated"), "gcs_path": gcs_path, "storage": "gcs"})
-
-        sup_files = []
-        for gcs_path in sup_blobs:
-            fname = gcs_path.split("/")[-1]
-            bmeta = _gcs_blob_metadata(gcs_path) or {}
-            sup_files.append({"filename": fname, "display_name": display_names.get(fname, fname),
-                              "size": bmeta.get("size"), "uploaded_at": bmeta.get("updated"),
-                              "gcs_path": gcs_path, "storage": "gcs"})
-
+        rfp_files = [{"filename": b.split("/")[-1], **(_gcs_blob_metadata(b) or {}), "storage": "gcs"} for b in rfp_blobs]
+        sup_files = [{"filename": b.split("/")[-1], "display_name": display_names.get(b.split("/")[-1], b.split("/")[-1]),
+                      **(_gcs_blob_metadata(b) or {}), "storage": "gcs"} for b in sup_blobs]
         return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "gcs"}
+
+    elif STORAGE_BACKEND == "hf":
+        rfp_paths = _hf.list_prefix(f"projects/{project_id}/rfp")
+        sup_paths = _hf.list_prefix(f"projects/{project_id}/suppliers")
+        rfp_files = [{"filename": p.split("/")[-1], "storage": "hf"} for p in rfp_paths]
+        sup_files = [{"filename": p.split("/")[-1],
+                      "display_name": display_names.get(p.split("/")[-1], p.split("/")[-1]),
+                      "storage": "hf"} for p in sup_paths]
+        return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "hf"}
+
     else:
         rfp_dir = PROJECTS_DIR / project_id / "rfp"
         sup_dir = PROJECTS_DIR / project_id / "suppliers"
-
-        rfp_files = []
+        rfp_files, sup_files = [], []
         if rfp_dir.exists():
             for f in rfp_dir.iterdir():
                 if f.is_file():
@@ -429,8 +449,6 @@ def list_project_files(project_id: str) -> dict:
                     rfp_files.append({"filename": f.name, "size": st.st_size,
                                       "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
                                       "storage": "local"})
-
-        sup_files = []
         if sup_dir.exists():
             for f in sup_dir.iterdir():
                 if f.is_file():
@@ -439,23 +457,18 @@ def list_project_files(project_id: str) -> dict:
                                       "size": st.st_size,
                                       "uploaded_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
                                       "storage": "local"})
-
         return {"rfp": rfp_files, "suppliers": sup_files, "storage_backend": "local"}
 
 
-def get_signed_url(project_id: str, role: str, filename: str, expiry_minutes: int = 60) -> Optional[str]:
+def get_signed_url(project_id, role, filename, expiry_minutes=60):
     if role not in ("rfp", "suppliers"):
-        role = "suppliers" if role == "supplier" else role
+        role = "suppliers"
     gcs_path = f"projects/{project_id}/{role}/{filename}"
     if _gcs_enabled:
         blob = _gcs_blob(gcs_path)
         if not blob.exists():
             return None
-        return blob.generate_signed_url(
-            expiration=timedelta(minutes=expiry_minutes),
-            method="GET",
-            version="v4",
-        )
+        return blob.generate_signed_url(expiration=timedelta(minutes=expiry_minutes), method="GET", version="v4")
     return None
 
 
@@ -463,50 +476,47 @@ def get_signed_url(project_id: str, role: str, filename: str, expiry_minutes: in
 # Path helpers
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_rfp_path(project_id: str) -> Optional[Path]:
+def get_rfp_path(project_id):
     rfp_dir = PROJECTS_DIR / project_id / "rfp"
     if not rfp_dir.exists():
         return None
     files = [f for f in rfp_dir.iterdir() if f.is_file()]
     return files[0] if files else None
 
-
-def _get_rfp_filename_local(project_id: str) -> Optional[str]:
+def _get_rfp_filename_local(project_id):
     p = get_rfp_path(project_id)
     return p.name if p else None
 
-
-def get_supplier_paths(project_id: str) -> list[Path]:
+def get_supplier_paths(project_id):
     sup_dir = PROJECTS_DIR / project_id / "suppliers"
     if not sup_dir.exists():
         return []
     return [f for f in sup_dir.iterdir() if f.is_file()]
 
-
-def get_questions_path(project_id: str) -> Path:
+def get_questions_path(project_id):
     return PROJECTS_DIR / project_id / "metadata" / "questions.json"
 
-
-def get_suppliers_meta_path(project_id: str) -> Path:
+def get_suppliers_meta_path(project_id):
     return PROJECTS_DIR / project_id / "metadata" / "suppliers.json"
 
-
-def is_gcs_enabled() -> bool:
+def is_gcs_enabled():
     return _gcs_enabled
 
+def is_hf_enabled():
+    return STORAGE_BACKEND == "hf" and _hf_enabled
+
 
 # ════════════════════════════════════════════════════════════════════════════
-# Module state management
+# Module states
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_module_states(project_id: str) -> dict:
+def get_module_states(project_id):
     project = get_project(project_id)
     if not project:
         return dict(_DEFAULT_MODULE_STATES)
     return project.get("module_states", dict(_DEFAULT_MODULE_STATES))
 
-
-def update_module_state(project_id: str, module: str, state: str) -> dict:
+def update_module_state(project_id, module, state):
     valid_modules = {"rfp", "technical", "pricing"}
     valid_states  = {"pending", "active", "complete", "error"}
     if module not in valid_modules:
@@ -523,16 +533,13 @@ def update_module_state(project_id: str, module: str, state: str) -> dict:
 # Feature flags
 # ════════════════════════════════════════════════════════════════════════════
 
-def get_feature_flags(project_id: str) -> dict:
+def get_feature_flags(project_id):
     stored = load_metadata(project_id, "feature_flags.json")
     if stored is None:
         return dict(_DEFAULT_FEATURE_FLAGS)
-    merged = dict(_DEFAULT_FEATURE_FLAGS)
-    merged.update(stored)
-    return merged
+    return {**_DEFAULT_FEATURE_FLAGS, **stored}
 
-
-def set_feature_flags(project_id: str, updates: dict) -> dict:
+def set_feature_flags(project_id, updates):
     current = get_feature_flags(project_id)
     for key, val in updates.items():
         if key in _DEFAULT_FEATURE_FLAGS:
@@ -545,7 +552,7 @@ def set_feature_flags(project_id: str, updates: dict) -> dict:
 # Audit log
 # ════════════════════════════════════════════════════════════════════════════
 
-def save_audit_log(project_id: str, entry: dict) -> None:
+def save_audit_log(project_id, entry):
     existing = load_metadata(project_id, "audit_log.json") or []
     if not isinstance(existing, list):
         existing = []
@@ -554,9 +561,6 @@ def save_audit_log(project_id: str, entry: dict) -> None:
         existing = existing[-500:]
     save_metadata(project_id, "audit_log.json", existing)
 
-
-def load_audit_log(project_id: str, limit: int = 50) -> list:
+def load_audit_log(project_id, limit=50):
     log = load_metadata(project_id, "audit_log.json") or []
-    if not isinstance(log, list):
-        return []
-    return log[-limit:]
+    return log[-limit:] if isinstance(log, list) else []

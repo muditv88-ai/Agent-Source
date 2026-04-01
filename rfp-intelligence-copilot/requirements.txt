@@ -33,13 +33,16 @@ openpyxl>=3.1.2
 pdfplumber>=0.11.0
 xlrd>=2.0.1
 
-# Data / Analytics (used by document_parser, pricing_analyzer, pricing_parser, scenario_engine)
+# Data / Analytics
 pandas>=2.2.0
 numpy>=1.26.0
 scipy>=1.13.0
 
 # Cloud Storage
 google-cloud-storage>=2.17.0
+
+# Hugging Face persistence (STORAGE_BACKEND=hf)
+huggingface_hub>=0.23.0
 
 # Utils
 python-dotenv>=1.0.1
