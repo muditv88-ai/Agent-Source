@@ -19,7 +19,7 @@ from typing import Deque, Literal, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.services.user_store import get_current_user
+from app.services.auth_service import get_current_user   # ← fixed import
 
 # ── Types ────────────────────────────────────────────────────────────
 AgentStatus = Literal["running", "complete", "queued", "idle", "error"]
