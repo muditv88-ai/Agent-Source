@@ -1,0 +1,56 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'rfp-intelligence-copilot/**'
+      - '.github/workflows/backend-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rfp-intelligence-copilot/**'
+
+jobs:
+  test:
+    name: Pytest + Ruff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rfp-intelligence-copilot
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+
+      - name: Lint with Ruff
+        run: ruff check app/ tests/ --select E,F,W --ignore E501
+        continue-on-error: true  # lint warnings don't block deploy
+
+      - name: Run tests with coverage
+        env:
+          ENVIRONMENT: test
+          DATABASE_URL: sqlite:///:memory:
+          SECRET_KEY: test-secret-key-not-for-production
+          NVIDIA_API_KEY: dummy-for-tests
+        run: |
+          pytest tests/ --cov=app --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: rfp-intelligence-copilot/coverage.xml
+          retention-days: 7
