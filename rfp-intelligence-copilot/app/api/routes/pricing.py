@@ -121,7 +121,17 @@ async def get_market_rates(payload: MarketRateRequest):
         raise HTTPException(500, detail=str(e))
 
 # ── In-memory staging store (replaces Redis for now) ─────────────────────────
-import uuid, io, logging
+import uuid, io, logging, math
+
+def _sanitize(obj):
+    """Recursively replace NaN/Inf floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(i) for i in obj]
+    return obj
 _STAGING: dict = {}
 logger = logging.getLogger(__name__)
 
@@ -139,6 +149,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
 
     # Normalise column names
     df.columns = [str(c).strip() for c in df.columns]
+    df = df.where(pd.notna(df), None)
     raw_rows = len(df.dropna(how="all"))
 
     # Auto-detect column mapping
@@ -310,3 +321,13 @@ async def confirm_supplier_sheet(payload: ConfirmSheetRequest):
         "project_id":           payload.project_id,
         "rows":                 rows,  # ← frontend stores this
     }
+
+# Monkey-patch: sanitize NaN/Inf at response level
+from fastapi.responses import JSONResponse
+import math, json
+
+class _SafeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        return super().default(obj)
