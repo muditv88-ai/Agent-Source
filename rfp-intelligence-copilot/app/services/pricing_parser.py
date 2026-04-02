@@ -600,3 +600,253 @@ def parse_pricing_response(file_text: str, supplier_name: str = "Supplier", **kw
             os.unlink(tmp_path)
         except OSError:
             pass
+
+# ═══ parse_pricing_sheet_with_diagnostics v1 ══════════════════════════════════
+import re as _re2, io as _io2, openpyxl as _openpyxl
+_EXCL=["request for proposal","instructions:","shaded columns","annual contract value =","title ","section ","part a","part b","appendix","exhibit","attachment","schedule","note:","notes:","please fill","supplier to complete","buyer to complete","highlighted cells","yellow cells","orange cells","do not modify","do not change","for internal use","page ","confidential","rfp template","commercial price sheet","technical price sheet","pricing sheet","cost breakdown"]
+_IKR=_re2.compile(r"^(SKU|ITEM|PART|PROD|REF|MAT|API|NDC)[-_ ]?[0-9A-Z]",_re2.IGNORECASE)
+_NKR=_re2.compile(r"^[0-9]{1,5}([.\-][0-9])?$")
+_HW={"sku","item","part","description","qty","quantity","price","cost","total","unit","volume","annual","drug","strength","form","supplier","buyer"}
+_PS=["commercial","pricing","price","cost","quotation","quote","unit price","rate card","costing"]
+_HS=["sku","item","description","drug","qty","quantity","annual","unit price","unit cost","total","cost","price","volume","strength","form","margin","overhead","packaging"]
+_CN={"sku":"item_key","sku#":"item_key","item no":"item_key","item #":"item_key","part":"item_key","material no":"item_key","description":"description","drug name":"description","item":"description","product":"description","service":"description","annual vol":"annual_volume","annual volume":"annual_volume","qty":"quantity","quantity":"quantity","units":"quantity","api cost":"api_cost","active ingredient":"api_cost","raw material cost":"rm_cost","rm cost":"rm_cost","packaging cost":"pkg_cost","pkg cost":"pkg_cost","manufacturing cost":"mfg_cost","mfg cost":"mfg_cost","overhead cost":"overhead","overhead":"overhead","profit margin":"margin","margin":"margin","total unit cost":"total_unit_cost","unit total":"total_unit_cost","unit price":"total_unit_cost","all-in":"total_unit_cost","quoted price":"total_unit_cost","net transfer price":"total_unit_cost","all in cost":"total_unit_cost","annual contract value":"annual_contract_value","annual value":"annual_contract_value","currency":"currency","uom":"uom","unit":"uom","lead time":"lead_time","moq":"moq","shelf life":"shelf_life","storage":"storage_condition"}
+
+def _vr(rv,ik,mn):
+    j=" ".join(str(v) for v in rv if v is not None).strip().lower()
+    for p in _EXCL:
+        if p in j: return False,f"excluded_phrase:{p!r}"
+    if ik:
+        k=str(ik).strip()
+        if not (_IKR.match(k) or _NKR.match(k)):
+            if k.lower() in _HW: return False,f"repeated_header:{k!r}"
+    ne=sum(1 for v in rv if v is not None and str(v).strip())
+    m=max(3,mn//3) if mn else 3
+    if ne<m: return False,f"sparse:{ne}<{m}"
+    return True,""
+
+def parse_pricing_sheet_with_diagnostics(file_bytes,file_ext,supplier_name):
+    wb=_openpyxl.load_workbook(_io2.BytesIO(file_bytes),data_only=True)
+    bw,bs=None,-1
+    for ws in wb.worksheets:
+        sc=sum(3 for s in _PS if s in ws.title.lower())
+        c=t=0
+        for row in ws.iter_rows(max_row=20,values_only=True):
+            for x in row:
+                if x is not None:
+                    t+=1
+                    try: float(str(x).replace(",","").replace("$","")); c+=1
+                    except: pass
+        if t: sc+=int(c/t*10)
+        if sc>bs: bs,bw=sc,ws
+    ws=bw or wb.active
+    hi,hds=None,[]
+    for i,row in enumerate(ws.iter_rows(max_row=15,values_only=True)):
+        txt=" ".join(str(c).lower() for c in row if c is not None)
+        if sum(1 for s in _HS if s in txt)>=3: hi=i; hds=[str(c).strip() if c else "" for c in row]; break
+    if hi is None:
+        hi=0; hds=[str(c).strip() if c else "" for c in list(ws.iter_rows(max_row=1,values_only=True))[0]]
+    cm={}
+    hl=[h.lower().strip() for h in hds]
+    for i,h in enumerate(hl):
+        if not h: continue
+        if h in _CN: cm[hds[i]]=_CN[h]; continue
+        for k,v in _CN.items():
+            if k in h: cm[hds[i]]=v; break
+    ii=next((i for i,h in enumerate(hds) if cm.get(h)=="item_key"),0)
+    acc,exc=[],[]
+    ar=list(ws.iter_rows(min_row=hi+2,values_only=True))
+    rn=sum(1 for r in ar if any(c is not None and str(c).strip() for c in r))
+    for row in ar:
+        if not any(c is not None and str(c).strip() for c in row): continue
+        rv=list(row); ik=rv[ii] if ii<len(rv) else None
+        ok,reason=_vr(rv,ik,len(cm))
+        rd={hds[i]:rv[i] for i in range(min(len(hds),len(rv)))}
+        if ok: acc.append(rd)
+        else:
+            p=" | ".join(str(v) for v in rv[:6] if v is not None)[:120]
+            exc.append({"reason":reason,"preview":p})
+    mc=set(cm.values())
+    hk="item_key" in mc or "description" in mc
+    ht="total_unit_cost" in mc or "annual_contract_value" in mc
+    hq="annual_volume" in mc or "quantity" in mc
+    cf="high" if(hk and ht and hq) else "medium" if(hk and(ht or hq)) else "low"
+    w=[]
+    if not ht: w.append("No total cost column detected")
+    if not acc: w.append("No line items accepted"); cf="low"
+    if len(exc)>len(acc): w.append(f"More excluded ({len(exc)}) than accepted ({len(acc)})")
+    return {"detected_sheet_name":ws.title,"raw_non_empty_rows":rn,"accepted_line_items":len(acc),"accepted_line_items_data":acc,"excluded_rows":exc,"column_mapping":cm,"sample_rows":acc[:5],"parse_confidence":cf,"warnings":w}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# parse_pricing_sheet_with_diagnostics  — v1
+# ══════════════════════════════════════════════════════════════════════════════
+import re as _re_ps, io as _io_ps
+
+_PRICING_SHEET_KEYWORDS = [
+    "price", "pricing", "cost", "quotation", "quote", "rate card",
+    "costing", "commercial", "unit price", "unit cost",
+]
+_HEADER_SYNONYMS = {
+    "sku": "item_key", "sku#": "item_key", "sku no": "item_key",
+    "item": "item_key", "item no": "item_key", "item #": "item_key",
+    "part": "item_key", "part no": "item_key", "material no": "item_key",
+    "description": "description", "drug name": "description",
+    "product": "description", "service": "description",
+    "annual vol": "annual_volume", "annual volume": "annual_volume",
+    "qty": "quantity", "quantity": "quantity", "units": "quantity",
+    "api cost": "api_cost", "active ingredient cost": "api_cost",
+    "raw material": "raw_material_cost", "raw material cost": "raw_material_cost",
+    "packaging": "packaging_cost", "packaging cost": "packaging_cost",
+    "manufacturing": "manufacturing_cost", "manufacturing cost": "manufacturing_cost",
+    "overhead": "overhead_cost", "overhead cost": "overhead_cost",
+    "margin": "margin", "profit margin": "margin",
+    "total unit cost": "total_unit_cost", "unit price": "total_unit_cost",
+    "total cost": "total_unit_cost", "net price": "total_unit_cost",
+    "annual contract value": "annual_contract_value",
+    "annual value": "annual_contract_value", "extended value": "annual_contract_value",
+    "currency": "currency", "moq": "moq", "lead time": "lead_time",
+    "shelf life": "shelf_life", "storage": "storage_condition",
+    "uom": "uom", "unit of measure": "uom",
+}
+_SKIP_PATTERNS = [
+    _re_ps.compile(p, _re_ps.IGNORECASE) for p in [
+        r"instructions?:", r"please (fill|enter|provide)",
+        r"shaded columns?", r"annual contract value\s*=",
+        r"^(notes?|note):?$", r"^(section|part)\s+[a-z0-9]",
+        r"^(appendix|exhibit|attachment|schedule)\b",
+        r"supplier to complete", r"buyer to complete",
+        r"do not (modify|change)", r"for internal use",
+        r"confidential", r"rfp template",
+        r"^page\s+\d+", r"highlighted cells", r"yellow cells",
+    ]
+]
+
+
+def _is_skip_row(row_text: str) -> bool:
+    t = row_text.strip()
+    if not t:
+        return True
+    return any(p.search(t) for p in _SKIP_PATTERNS)
+
+
+def _score_sheet(sheet_name: str, rows: list) -> int:
+    score = 0
+    name_lower = sheet_name.lower()
+    for kw in _PRICING_SHEET_KEYWORDS:
+        if kw in name_lower:
+            score += 10
+    sample_text = " ".join(
+        str(c) for row in rows[:20] for c in row if c is not None
+    ).lower()
+    for kw in _PRICING_SHEET_KEYWORDS:
+        if kw in sample_text:
+            score += 3
+    numeric_cells = sum(
+        1 for row in rows[:30] for c in row
+        if isinstance(c, (int, float)) and c not in (0, None)
+    )
+    score += min(numeric_cells, 20)
+    return score
+
+
+def _detect_header_row(rows: list) -> tuple[int, dict]:
+    """Return (header_row_index, column_mapping)."""
+    for i, row in enumerate(rows[:15]):
+        cells = [str(c).strip().lower() if c is not None else "" for c in row]
+        matched = sum(1 for c in cells if c in _HEADER_SYNONYMS)
+        if matched >= 2:
+            mapping = {}
+            for j, cell in enumerate(cells):
+                if cell in _HEADER_SYNONYMS:
+                    mapping[j] = _HEADER_SYNONYMS[cell]
+            return i, mapping
+    return -1, {}
+
+
+def _confidence(mapping: dict, rows_count: int) -> str:
+    canonical_hits = len(set(mapping.values()))
+    has_total = any(v in ("total_unit_cost", "annual_contract_value") for v in mapping.values())
+    has_key   = any(v == "item_key" for v in mapping.values())
+    if canonical_hits >= 4 and has_total and has_key and rows_count >= 3:
+        return "high"
+    if canonical_hits >= 2 and rows_count >= 1:
+        return "medium"
+    return "low"
+
+
+def parse_pricing_sheet_with_diagnostics(
+    file_bytes: bytes,
+    file_ext: str,
+    supplier_name: str = "Unknown",
+) -> dict:
+    import openpyxl as _xl
+
+    warnings: list[str] = []
+
+    # ── load workbook ────────────────────────────────────────────────────────
+    try:
+        wb = _xl.load_workbook(_io_ps.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        raise ValueError(f"Cannot open workbook: {e}")
+
+    # ── pick best sheet ──────────────────────────────────────────────────────
+    best_sheet, best_score = wb.worksheets[0], -1
+    for ws in wb.worksheets:
+        rows = list(ws.iter_rows(values_only=True))
+        score = _score_sheet(ws.title, rows)
+        if score > best_score:
+            best_score, best_sheet = score, ws
+
+    all_rows = list(best_sheet.iter_rows(values_only=True))
+    non_empty = [r for r in all_rows if any(c is not None for c in r)]
+
+    # ── detect header row ────────────────────────────────────────────────────
+    header_idx, col_map = _detect_header_row(non_empty)
+    if header_idx == -1:
+        warnings.append("Could not detect a header row — using column positions as keys")
+        header_idx = 0
+        col_map = {i: f"col_{i}" for i in range(len(non_empty[0])) if non_empty[0][i] is not None}
+
+    human_col_map = {
+        str(non_empty[header_idx][k]) if non_empty[header_idx][k] is not None else f"col_{k}": v
+        for k, v in col_map.items()
+    }
+
+    # ── extract data rows ────────────────────────────────────────────────────
+    data_rows = non_empty[header_idx + 1:]
+    accepted, excluded = [], []
+
+    for row in data_rows:
+        row_text = " ".join(str(c) for c in row if c is not None)
+        if _is_skip_row(row_text):
+            excluded.append({"raw": row_text[:120], "reason": "instruction/header/blank row"})
+            continue
+        has_numeric = any(isinstance(row[i], (int, float)) for i in col_map if i < len(row))
+        has_text    = any(isinstance(row[i], str) and row[i].strip() for i in col_map if i < len(row))
+        if not (has_numeric or has_text):
+            excluded.append({"raw": row_text[:120], "reason": "no usable content"})
+            continue
+        record = {}
+        for col_idx, canonical in col_map.items():
+            val = row[col_idx] if col_idx < len(row) else None
+            record[canonical] = val
+        accepted.append(record)
+
+    if not accepted:
+        warnings.append("No data rows extracted — sheet may be template-only or heavily instruction-based")
+
+    sample = accepted[:5]
+    confidence = _confidence(col_map, len(accepted))
+
+    return {
+        "supplier_name":            supplier_name,
+        "detected_sheet_name":      best_sheet.title,
+        "raw_non_empty_rows":       len(non_empty),
+        "accepted_line_items":      len(accepted),
+        "accepted_line_items_data": accepted,
+        "excluded_rows":            excluded[:20],
+        "column_mapping":           human_col_map,
+        "sample_rows":              sample,
+        "parse_confidence":         confidence,
+        "warnings":                 warnings,
+    }
