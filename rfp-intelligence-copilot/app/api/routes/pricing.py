@@ -121,7 +121,7 @@ async def get_market_rates(payload: MarketRateRequest):
         raise HTTPException(500, detail=str(e))
 
 # ── In-memory staging store (replaces Redis for now) ─────────────────────────
-import uuid, io, logging, math
+import uuid, io, logging, math, math
 
 def _sanitize(obj):
     """Recursively replace NaN/Inf floats with None for JSON safety."""
@@ -134,6 +134,17 @@ def _sanitize(obj):
     return obj
 _STAGING: dict = {}
 logger = logging.getLogger(__name__)
+
+def _clean(obj):
+    """Recursively replace NaN/Inf floats with None for JSON safety."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else round(obj, 4)
+    if isinstance(obj, dict):
+        return {k: _clean(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean(i) for i in obj]
+    return obj
+
 
 def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
     """Parse xlsx/csv into structured rows with diagnostics."""
@@ -227,7 +238,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
 
     display_col_map = {v: k for k, v in col_map.items()}  # reversed for display
 
-    return {
+    return _clean({
         "rows": rows,
         "diagnostics": {
             "file_name":            filename,
@@ -240,7 +251,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
             "parse_confidence":     confidence,
             "warnings":             warnings,
         },
-    }
+    })
 
 
 @router.post("/ingest")
