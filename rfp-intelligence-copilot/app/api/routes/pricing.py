@@ -340,3 +340,96 @@ async def compare_suppliers(payload: AnalyzePricingRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW ENDPOINTS — add these to the BOTTOM of pricing.py
+# (after all existing endpoints)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from fastapi import UploadFile, File, Form
+
+class WorkbookIngestResponse(BaseModel):
+    supplier: str
+    source_sheet: Optional[str] = None
+    confidence_tier: str           # HIGH | MEDIUM | LOW
+    auto_ingest: bool
+    review_needed: bool
+    total_line_items: int = 0
+    missing_totals: int = 0
+    has_cost_breakdown: bool = False
+    error: Optional[str] = None
+    validation_flags: List[Dict[str, Any]] = []
+    schema: Optional[Dict[str, Any]] = None
+
+
+@router.post("/ingest-workbook", response_model=WorkbookIngestResponse,
+             summary="Ingest supplier pricing workbook (Excel) — detect sheet, map columns, validate")
+async def ingest_pricing_workbook(
+    file: UploadFile = File(..., description="Supplier pricing .xlsx file"),
+    supplier_name: str = Form(..., description="Supplier name or identifier"),
+    project_id: str    = Form(..., description="RFP project ID"),
+    source_type: str   = Form(default="supplier_response",
+                              description="rfp_template | supplier_response"),
+):
+    """
+    Primary endpoint for structured pricing sheet ingestion.
+
+    Pipeline:
+      1. Detect pricing sheet(s) in the workbook
+      2. Map columns to canonical fields (SKU, unit_price, total_unit_cost, ACV, etc.)
+      3. Extract all line items into canonical schema
+      4. Validate: formula consistency, missing fields, ACV math, outliers
+      5. Return confidence tier: HIGH (auto-ingest) / MEDIUM (review) / LOW (manual)
+    """
+    content = await file.read()
+    agent   = PricingAgent()
+    result  = agent._ingest_workbook(
+        file_bytes    = content,
+        supplier_name = supplier_name,
+        source_type   = source_type,
+    )
+
+    if "error" in result and "schema" not in result:
+        return WorkbookIngestResponse(
+            supplier         = supplier_name,
+            confidence_tier  = "LOW",
+            auto_ingest      = False,
+            review_needed    = True,
+            error            = result["error"],
+        )
+
+    schema     = result.get("schema", {})
+    validation = result.get("validation", {})
+    summary    = schema.get("summary", {})
+
+    return WorkbookIngestResponse(
+        supplier           = supplier_name,
+        source_sheet       = result.get("source_sheet"),
+        confidence_tier    = result.get("confidence_tier", "LOW"),
+        auto_ingest        = result.get("auto_ingest", False),
+        review_needed      = result.get("review_needed", True),
+        total_line_items   = summary.get("total_line_items", 0),
+        missing_totals     = summary.get("missing_totals", 0),
+        has_cost_breakdown = summary.get("has_cost_breakdown", False),
+        validation_flags   = validation.get("flags", []),
+        schema             = schema if result.get("auto_ingest") else None,
+        error              = None,
+    )
+
+
+@router.post("/ingest-workbook/full",
+             summary="Ingest workbook and return FULL canonical schema + validation report")
+async def ingest_pricing_workbook_full(
+    file: UploadFile = File(...),
+    supplier_name: str = Form(...),
+    project_id: str    = Form(...),
+    source_type: str   = Form(default="supplier_response"),
+):
+    """Returns the complete canonical schema regardless of confidence tier."""
+    content = await file.read()
+    agent   = PricingAgent()
+    return agent._ingest_workbook(
+        file_bytes    = content,
+        supplier_name = supplier_name,
+        source_type   = source_type,
+    )
