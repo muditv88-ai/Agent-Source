@@ -7,7 +7,7 @@ Used by:
   - app/api/routes/rfp.py       (uploaded RFP files)
 
 Configuration (environment variables):
-  STORAGE_BACKEND   : 's3' | 'r2' | 'gcs' | 'local'  (default: 'local')
+  STORAGE_BACKEND   : 's3' | 'r2' | 'gcs' | 'local'  (default: 'gcs')
 
   S3:
     AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, S3_BUCKET_NAME
@@ -30,7 +30,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-STORAGE_BACKEND: str = os.environ.get("STORAGE_BACKEND", "local").lower()
+STORAGE_BACKEND: str = os.environ.get("STORAGE_BACKEND", "gcs").lower()
 
 
 class StorageClient:
