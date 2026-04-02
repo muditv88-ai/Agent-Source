@@ -1,8 +1,8 @@
 """
-main.py  v5.1
+main.py  v5.2
 
-Fixes:
-  - /award router wired in (award.py existed but was never imported or registered)
+Changes:
+  - /agent-logs router wired in for live frontend Agent Analytics strip
 """
 from __future__ import annotations
 
@@ -29,16 +29,17 @@ from app.api.routes.communications import router as communications_router
 from app.api.routes.suppliers      import router as suppliers_router
 from app.api.routes.drawings       import router as drawings_router
 from app.api.routes.files          import router as files_router
-from app.api.routes.award          import router as award_router   # ← was missing
+from app.api.routes.award          import router as award_router
+from app.api.routes.agent_logs     import router as agent_logs_router   # ← new
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_db_and_tables()       # idempotent — creates tables if not present
-    start_deadline_scheduler()   # starts APScheduler hourly deadline check
+    create_db_and_tables()
+    start_deadline_scheduler()
     yield
-    stop_deadline_scheduler()    # clean shutdown
+    stop_deadline_scheduler()
 
 
 # ── CORS origins ─────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 # ── App ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RFP Intelligence Copilot",
-    version="5.1.0",
+    version="5.2.0",
     description="AI-powered procurement automation — RFP generation, bid evaluation, supplier onboarding, persistent GCS file library, contract award.",
     lifespan=lifespan,
 )
@@ -81,9 +82,10 @@ app.include_router(communications_router, prefix="/communications",     tags=["C
 app.include_router(suppliers_router,      prefix="/suppliers",          tags=["Suppliers"])
 app.include_router(drawings_router,       prefix="/drawings",           tags=["Drawings"])
 app.include_router(files_router,          prefix="/files",              tags=["Files"])
-app.include_router(award_router,          prefix="/award",              tags=["Award"])  # ← was missing
+app.include_router(award_router,          prefix="/award",              tags=["Award"])
+app.include_router(agent_logs_router,     prefix="/agent-logs",         tags=["Agent Logs"])  # ← new
 
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "ok", "version": "5.1.0", "service": "RFP Intelligence Copilot"}
+    return {"status": "ok", "version": "5.2.0", "service": "RFP Intelligence Copilot"}
