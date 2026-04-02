@@ -8,6 +8,12 @@ the live Agent Analytics strip.
 Usage (from any route / service):
     from app.api.routes.agent_logs import push_log
     push_log(agent_id="technical", status="running", message="Scoring supplier responses...")
+
+Auth behaviour:
+  - Authenticated users  → receive up to `limit` real log entries.
+  - Unauthenticated      → receive [] (empty list, no 401).
+    This prevents a 401 flood in browser devtools while the frontend
+    is initialising its auth session on first load.
 """
 from __future__ import annotations
 
@@ -19,7 +25,7 @@ from typing import Deque, Literal, Optional
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from app.services.auth_service import get_current_user   # ← fixed import
+from app.services.auth_service import get_current_user_optional
 
 # ── Types ────────────────────────────────────────────────────────────
 AgentStatus = Literal["running", "complete", "queued", "idle", "error"]
@@ -67,10 +73,14 @@ router = APIRouter(tags=["Agent Logs"])
 @router.get("", response_model=list[AgentLogEntry])
 async def list_agent_logs(
     limit: int = 50,
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_current_user_optional),
 ):
     """
     Return the most recent `limit` agent log entries (newest first).
-    The frontend polls this every 3 s and deduplicates by `id`.
+    Returns [] for unauthenticated requests instead of 401 —
+    prevents console noise while the frontend session is initialising.
     """
+    if not current_user:
+        return []
     return list(_LOG_BUFFER)[:limit]
+
