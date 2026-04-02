@@ -165,12 +165,14 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
 
     # Auto-detect column mapping
     COL_ALIASES = {
-        "line_item":    ["line item", "item", "description", "material", "service", "item description"],
-        "category":     ["category", "type", "group", "class"],
-        "unit":         ["unit", "uom", "unit of measure", "uom/unit"],
+        "line_item":    ["line item", "item", "description", "material", "service", "item description",
+                         "drug name", "product", "sku#", "sku", "product name"],
+        "category":     ["category", "type", "group", "class", "dosage form", "strength"],
+        "unit":         ["unit", "uom", "unit of measure", "uom/unit", "pack type", "form"],
         "supplier":     ["supplier", "vendor", "company", "bidder"],
-        "unit_price":   ["unit price", "rate", "price", "unit cost", "cost", "rate (aud)", "unit rate"],
-        "quantity":     ["quantity", "qty", "volume", "amount", "hours"],
+        "unit_price":   ["unit price", "rate", "price", "unit cost", "cost", "rate (aud)", "unit rate",
+                         "unit total", "total unit cost", "unit total cost"],
+        "quantity":     ["quantity", "qty", "volume", "amount", "hours", "annual vol"],
         "total":        ["total", "extended", "line total", "total cost", "total price", "total (aud)"],
     }
 
@@ -242,7 +244,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
         "rows": rows,
         "diagnostics": {
             "file_name":            filename,
-            "detected_sheet_name":  "Sheet1",
+            "detected_sheet_name":  best_sheet if not filename.lower().endswith(".csv") else "CSV",
             "raw_non_empty_rows":   raw_rows,
             "accepted_line_items":  len(rows),
             "excluded_rows":        excluded,
