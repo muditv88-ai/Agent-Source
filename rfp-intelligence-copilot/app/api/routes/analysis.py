@@ -13,6 +13,13 @@ Background job flow (used by POST /projects/{id}/analyze):
   3. Parses supplier documents, maps question_id -> full_text for each supplier.
   4. Runs TechnicalAnalysisAgent and shapes output into AnalysisResult schema.
   5. Stores result in job_store; GET /status/{job_id} returns it to the frontend.
+
+URL namespace (prefix set ONLY in main.py, never here):
+  GET  /technical-analysis/status/{job_id}
+  POST /technical-analysis/run
+  POST /technical-analysis/gap
+  POST /technical-analysis/report
+  GET  /technical-analysis/weights/defaults
 """
 import asyncio
 import logging
@@ -34,11 +41,12 @@ from app.services.project_store import (
 from app.services.document_parser import parse_document
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/analysis", tags=["Technical Analysis"])
+# !! NO prefix here — main.py mounts this router at /technical-analysis !!
+router = APIRouter(tags=["Technical Analysis"])
 _executor = ThreadPoolExecutor(max_workers=4)
 
 
-# ── Request / Response models ─────────────────────────────────────────────────
+# ── Request / Response models ───────────────────────────────────────────────────────
 
 class RunAnalysisRequest(BaseModel):
     project_id: str
@@ -81,7 +89,7 @@ class ReportRequest(BaseModel):
     overall_score: float
 
 
-# ── Background job helpers ─────────────────────────────────────────────────────
+# ── Background job helpers ──────────────────────────────────────────────────────────
 
 def _overall(supplier_scores: Dict) -> float:
     vals = [
@@ -264,12 +272,13 @@ async def _run_analysis_job(project_id: str, job_id: str, _rfp_id: str = ""):
         update_module_state(project_id, "technical", "error")
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# ── Endpoints ─────────────────────────────────────────────────────────────────────────
 
 @router.get("/status/{job_id}")
 async def get_analysis_status(job_id: str):
     """
     Polled by the frontend after POST /projects/{id}/analyze.
+    Full URL: GET /technical-analysis/status/{job_id}
     Returns job status + result (AnalysisResult) when complete.
     """
     job = job_store.get(job_id)
@@ -288,6 +297,7 @@ async def run_analysis(payload: RunAnalysisRequest):
     """
     FM-6.1 / FM-6.2 — Score all suppliers with optional weight overrides.
     Synchronous version for direct API callers (not via project background flow).
+    Full URL: POST /technical-analysis/run
     """
     try:
         agent = TechnicalAnalysisAgent(
@@ -308,7 +318,9 @@ async def run_analysis(payload: RunAnalysisRequest):
 
 @router.post("/gap")
 async def gap_analysis(payload: GapAnalysisRequest):
-    """FM-6.3 — Run gap analysis on pre-computed scores."""
+    """FM-6.3 — Run gap analysis on pre-computed scores.
+    Full URL: POST /technical-analysis/gap
+    """
     try:
         agent = TechnicalAnalysisAgent(
             min_score=payload.min_score,
@@ -331,7 +343,9 @@ async def gap_analysis(payload: GapAnalysisRequest):
 
 @router.post("/report")
 async def generate_report(payload: ReportRequest):
-    """FM-6.4 — Generate a narrative evaluation report for a single supplier."""
+    """FM-6.4 — Generate a narrative evaluation report for a single supplier.
+    Full URL: POST /technical-analysis/report
+    """
     try:
         agent = TechnicalAnalysisAgent()
         report = agent._generate_report(
@@ -346,7 +360,9 @@ async def generate_report(payload: ReportRequest):
 
 @router.get("/weights/defaults")
 async def get_default_weights():
-    """FM-6.2 — Return default weight categories for the UI sliders."""
+    """FM-6.2 — Return default weight categories for the UI sliders.
+    Full URL: GET /technical-analysis/weights/defaults
+    """
     return {
         "categories": [
             {"key": "technical",  "label": "Technical Capability", "default_weight": 0.35},
