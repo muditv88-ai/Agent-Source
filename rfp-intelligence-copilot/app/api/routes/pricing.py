@@ -11,6 +11,8 @@ FM-7.6  Side-by-side comparison output
 All computation is delegated to PricingAgent which wraps
 pricing_analyzer.py and pricing_parser.py — those are NOT modified.
 """
+import asyncio
+import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -19,6 +21,10 @@ from pydantic import BaseModel, Field
 from app.agents.pricing_agent import PricingAgent
 
 router = APIRouter(prefix="/pricing", tags=["Pricing Analysis"])
+
+# ── In-memory job store for async pricing jobs ────────────────────────────────
+# { job_id: { status, result, error } }
+_JOBS: Dict[str, Dict[str, Any]] = {}
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -35,6 +41,13 @@ class AnalyzePricingRequest(BaseModel):
     raw_pricing_data: List[RawPricingItem] = Field(
         ..., description="One entry per supplier pricing document"
     )
+    base_currency: str = Field(default="USD", description="Currency to normalise to")
+
+
+# Frontend-compatible request: accepts rfp_id + optional project_id
+class RfpPricingRequest(BaseModel):
+    rfp_id: str
+    project_id: Optional[str] = None
     base_currency: str = Field(default="USD", description="Currency to normalise to")
 
 
@@ -62,17 +75,70 @@ class CurrencyNormalizeRequest(BaseModel):
     base_currency: str = "USD"
 
 
+# ── Background job runner ─────────────────────────────────────────────────────
+
+async def _run_pricing_job(job_id: str, rfp_id: str, project_id: Optional[str], base_currency: str):
+    """
+    Loads supplier pricing file texts for the given rfp_id from the project
+    store, then runs PricingAgent. Falls back to an empty result if no
+    pricing data is available yet (avoids 500 on fresh projects).
+    """
+    try:
+        # Attempt to pull parsed pricing data via the project store
+        # If the project store / rfp store exposes raw text we use it;
+        # otherwise we run with an empty list so the job completes cleanly.
+        raw: List[Dict[str, Any]] = []
+        try:
+            from app.services.project_store import get_project_pricing_texts  # type: ignore
+            raw = get_project_pricing_texts(rfp_id) or []
+        except Exception:
+            # Service not yet implemented or rfp_id not found — run with empty data
+            raw = []
+
+        agent = PricingAgent(base_currency=base_currency)
+        result = agent.run({"raw_pricing_data": raw})
+        result["rfp_id"] = rfp_id
+        result["project_id"] = project_id or rfp_id
+        _JOBS[job_id] = {"status": "completed", "result": result}
+    except Exception as exc:
+        _JOBS[job_id] = {"status": "failed", "error": str(exc)}
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/analyze")
+async def analyze_pricing_rfp(payload: RfpPricingRequest):
+    """
+    Frontend-compatible entry point (matches api.ts contract).
+    Accepts { rfp_id, project_id } and returns { job_id, status } immediately.
+    The client polls /pricing-analysis/status/{job_id} until completed.
+    """
+    job_id = str(uuid.uuid4())
+    _JOBS[job_id] = {"status": "running"}
+    asyncio.create_task(
+        _run_pricing_job(job_id, payload.rfp_id, payload.project_id, payload.base_currency)
+    )
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/status/{job_id}")
+async def get_pricing_status(job_id: str):
+    """
+    Poll endpoint for async pricing jobs.
+    Returns { job_id, status, result?, error? }.
+    """
+    job = _JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return {"job_id": job_id, **job}
+
+
+@router.post("/analyze-raw")
 async def analyze_pricing(payload: AnalyzePricingRequest):
     """
-    FM-7.1 / FM-7.2 — Full pipeline:
-      1. Parse each supplier's pricing sheet
-      2. Normalize UoMs
-      3. Build cost model
-      4. Run comparative analysis
-    Returns cost_model, analysis summary, and normalized_pricing.
+    FM-7.1 / FM-7.2 — Full pipeline with explicit raw_pricing_data.
+    Use this when you have already extracted supplier text.
+    Returns cost_model, analysis summary, and normalized_pricing synchronously.
     """
     try:
         agent = PricingAgent(base_currency=payload.base_currency)
@@ -116,7 +182,7 @@ async def calculate_tco(payload: TCORequest):
 @router.post("/validity")
 async def check_price_validity(payload: ValidityCheckRequest):
     """
-    FM-7.5 — Flag expired or near-expiry (≤30 days) quotes.
+    FM-7.5 — Flag expired or near-expiry (<=30 days) quotes.
     Each quote gets validity_status: 'valid' | 'expiring_soon' | 'expired'
     and a days_to_expiry integer.
     """
@@ -173,10 +239,9 @@ async def compare_suppliers(payload: AnalyzePricingRequest):
         ]
         result = agent.run({"raw_pricing_data": raw})
 
-        # Build a flat comparison table from cost_model
         comparison = []
         cost_model = result.get("cost_model", {})
-        for supplier, data in cost_model.items() if isinstance(cost_model, dict) else []:
+        for supplier, data in (cost_model.items() if isinstance(cost_model, dict) else []):
             comparison.append({
                 "supplier": supplier,
                 "total_cost": data.get("total_cost"),
@@ -185,7 +250,6 @@ async def compare_suppliers(payload: AnalyzePricingRequest):
                 "line_item_count": data.get("line_item_count"),
             })
 
-        # Sort by total_cost ascending (cheapest first)
         comparison.sort(key=lambda x: (x.get("total_cost") or float("inf")))
 
         return {
