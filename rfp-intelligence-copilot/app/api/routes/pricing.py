@@ -120,38 +120,6 @@ async def get_market_rates(payload: MarketRateRequest):
         push_log(agent_id="pricing", status="error", message=str(e))
         raise HTTPException(500, detail=str(e))
 
-
-@router.post("/ingest")
-async def ingest_pricing_file(
-    file:       UploadFile     = File(...),
-    project_id: Optional[str] = Form(None),
-):
-    """
-    Accept an xlsx/csv of supplier pricing and store it.
-    """
-    push_log(agent_id="pricing", status="running",
-             message=f"Ingesting pricing file: {file.filename}")
-    file_bytes = await file.read()
-
-    gcs_blob = _save_to_gcs(
-        project_id=project_id,
-        category="pricing_files",
-        filename=file.filename,
-        file_bytes=file_bytes,
-        content_type=file.content_type,
-    )
-
-    push_log(agent_id="pricing", status="complete",
-             message=f"Pricing file stored: {file.filename}",
-             confidence=81)
-    return {
-        "status":     "received",
-        "filename":   file.filename,
-        "project_id": project_id,
-        "gcs_blob":   gcs_blob,
-        "size_bytes":  len(file_bytes),
-    }
-
 # ── In-memory staging store (replaces Redis for now) ─────────────────────────
 import uuid, io, logging
 _STAGING: dict = {}
@@ -265,7 +233,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
 
 
 @router.post("/ingest")
-async def ingest_pricing_file_v2(
+async def ingest_pricing_file(
     file:          UploadFile     = File(...),
     project_id:    Optional[str] = Form(None),
     supplier_name: Optional[str] = Form(None),
