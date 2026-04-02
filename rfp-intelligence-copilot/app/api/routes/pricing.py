@@ -151,3 +151,194 @@ async def ingest_pricing_file(
         "gcs_blob":   gcs_blob,
         "size_bytes":  len(file_bytes),
     }
+
+# ── In-memory staging store (replaces Redis for now) ─────────────────────────
+import uuid, io, logging
+_STAGING: dict = {}
+logger = logging.getLogger(__name__)
+
+def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
+    """Parse xlsx/csv into structured rows with diagnostics."""
+    try:
+        import pandas as pd
+    except ImportError:
+        raise HTTPException(503, detail="pandas not installed on backend")
+
+    if filename.lower().endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(file_bytes))
+    else:
+        df = pd.read_excel(io.BytesIO(file_bytes))
+
+    # Normalise column names
+    df.columns = [str(c).strip() for c in df.columns]
+    raw_rows = len(df.dropna(how="all"))
+
+    # Auto-detect column mapping
+    COL_ALIASES = {
+        "line_item":    ["line item", "item", "description", "material", "service", "item description"],
+        "category":     ["category", "type", "group", "class"],
+        "unit":         ["unit", "uom", "unit of measure", "uom/unit"],
+        "supplier":     ["supplier", "vendor", "company", "bidder"],
+        "unit_price":   ["unit price", "rate", "price", "unit cost", "cost", "rate (aud)", "unit rate"],
+        "quantity":     ["quantity", "qty", "volume", "amount", "hours"],
+        "total":        ["total", "extended", "line total", "total cost", "total price", "total (aud)"],
+    }
+
+    col_map = {}
+    warnings = []
+    for canonical, aliases in COL_ALIASES.items():
+        for col in df.columns:
+            if col.lower() in aliases:
+                col_map[col] = canonical
+                break
+
+    df = df.rename(columns=col_map)
+    missing = [c for c in ["line_item", "unit_price"] if c not in df.columns]
+    if missing:
+        warnings.append(f"Could not detect columns: {', '.join(missing)}")
+
+    # Drop empty rows
+    excluded = []
+    valid_rows = []
+    for _, row in df.iterrows():
+        if pd.isna(row.get("line_item", None)) or str(row.get("line_item", "")).strip() == "":
+            excluded.append({"reason": "Empty line item", "preview": str(dict(row))[:80]})
+            continue
+        if pd.isna(row.get("unit_price", None)):
+            excluded.append({"reason": "Missing unit price", "preview": str(row.get("line_item", ""))[:80]})
+            continue
+        valid_rows.append(row)
+
+    # Build PriceRow list
+    rows = []
+    supplier_totals: dict = {}
+    for i, row in enumerate(valid_rows):
+        supplier = str(row.get("supplier", "Unknown")).strip()
+        unit_price = float(row.get("unit_price", 0))
+        quantity   = float(row.get("quantity", 1))
+        total      = float(row.get("total", unit_price * quantity))
+        line_item  = str(row.get("line_item", f"Item {i+1}")).strip()
+        category   = str(row.get("category", "General")).strip()
+        unit       = str(row.get("unit", "unit")).strip()
+
+        rows.append({
+            "id":           str(i + 1),
+            "lineItem":     line_item,
+            "category":     category,
+            "unitOfMeasure": unit,
+            "supplier":     supplier,
+            "unitPrice":    round(unit_price, 2),
+            "quantity":     round(quantity, 2),
+            "total":        round(total, 2),
+            "delta":        0.0,  # computed after grouping
+        })
+
+    # Compute delta vs lowest per line item
+    from collections import defaultdict
+    item_min: dict = defaultdict(lambda: float("inf"))
+    for r in rows:
+        if r["total"] < item_min[r["lineItem"]]:
+            item_min[r["lineItem"]] = r["total"]
+    for r in rows:
+        mn = item_min[r["lineItem"]]
+        r["delta"] = round((r["total"] - mn) / mn * 100, 1) if mn > 0 else 0.0
+
+    confidence = "high" if len(missing) == 0 and len(warnings) == 0 else \
+                 "medium" if len(missing) <= 1 else "low"
+
+    display_col_map = {v: k for k, v in col_map.items()}  # reversed for display
+
+    return {
+        "rows": rows,
+        "diagnostics": {
+            "file_name":            filename,
+            "detected_sheet_name":  "Sheet1",
+            "raw_non_empty_rows":   raw_rows,
+            "accepted_line_items":  len(rows),
+            "excluded_rows":        excluded,
+            "column_mapping":       {v: k for k, v in col_map.items()},
+            "sample_rows":          [dict(r) for r in df.head(5).to_dict("records")],
+            "parse_confidence":     confidence,
+            "warnings":             warnings,
+        },
+    }
+
+
+@router.post("/ingest")
+async def ingest_pricing_file_v2(
+    file:          UploadFile     = File(...),
+    project_id:    Optional[str] = Form(None),
+    supplier_name: Optional[str] = Form(None),
+):
+    """Parse xlsx/csv, stage in memory, return diagnostics + sample for review."""
+    push_log(agent_id="pricing", status="running",
+             message=f"Parsing pricing file: {file.filename}")
+    file_bytes = await file.read()
+
+    try:
+        parsed = _parse_sheet(file_bytes, file.filename or "upload")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Sheet parse failed")
+        raise HTTPException(500, detail=f"Could not parse file: {exc}")
+
+    staging_id = str(uuid.uuid4())
+    _STAGING[staging_id] = {
+        "rows":        parsed["rows"],
+        "project_id":  project_id,
+        "supplier_name": supplier_name or file.filename,
+        "file_bytes":  file_bytes,
+        "filename":    file.filename,
+        "content_type": file.content_type,
+    }
+
+    push_log(agent_id="pricing", status="complete",
+             message=f"Parsed {len(parsed['rows'])} line items — awaiting confirmation",
+             confidence=81)
+
+    return {
+        "staging_id":  staging_id,
+        "diagnostics": parsed["diagnostics"],
+        "sample_rows": parsed["diagnostics"]["sample_rows"],
+    }
+
+
+class ConfirmSheetRequest(BaseModel):
+    staging_id:    str
+    project_id:    Optional[str] = "unassigned"
+    supplier_name: Optional[str] = None
+
+
+@router.post("/confirm-supplier-sheet")
+async def confirm_supplier_sheet(payload: ConfirmSheetRequest):
+    """Commit staged rows; return full PriceRow list for frontend store."""
+    staged = _STAGING.pop(payload.staging_id, None)
+    if not staged:
+        raise HTTPException(404, detail="Staging ID not found or already committed")
+
+    rows = staged["rows"]
+    if payload.supplier_name:
+        for r in rows:
+            if r["supplier"] in ("Unknown", "", staged.get("supplier_name", "")):
+                r["supplier"] = payload.supplier_name
+
+    # Optionally persist to GCS
+    _save_to_gcs(
+        project_id=payload.project_id,
+        category="pricing_files",
+        filename=staged["filename"],
+        file_bytes=staged["file_bytes"],
+        content_type=staged["content_type"],
+    )
+
+    push_log(agent_id="pricing", status="complete",
+             message=f"Committed {len(rows)} pricing rows for project {payload.project_id}",
+             confidence=90)
+
+    return {
+        "status":               "committed",
+        "line_items_committed": len(rows),
+        "project_id":           payload.project_id,
+        "rows":                 rows,  # ← frontend stores this
+    }
