@@ -8,8 +8,11 @@ FM-7.4  Currency normalization (live FX)
 FM-7.5  Price validity check (expired / expiring soon)
 FM-7.6  Side-by-side comparison output
 
-All computation is delegated to PricingAgent which wraps
-pricing_analyzer.py and pricing_parser.py — those are NOT modified.
+NOTE on router prefix:
+  This router has NO prefix here. main.py mounts it at prefix="/pricing-analysis",
+  so all endpoints are reachable at /pricing-analysis/<endpoint>.
+  The frontend (api.ts) calls /pricing-analysis/analyze, /pricing-analysis/status/{job_id},
+  /pricing-analysis/result/{rfp_id}, and /pricing-analysis/correct — all resolved correctly.
 """
 import asyncio
 import uuid
@@ -20,11 +23,15 @@ from pydantic import BaseModel, Field
 
 from app.agents.pricing_agent import PricingAgent
 
-router = APIRouter(prefix="/pricing", tags=["Pricing Analysis"])
+# ── No prefix here: main.py already mounts this router at /pricing-analysis ──
+router = APIRouter(tags=["Pricing Analysis"])
 
 # ── In-memory job store for async pricing jobs ────────────────────────────────
 # { job_id: { status, result, error } }
 _JOBS: Dict[str, Dict[str, Any]] = {}
+
+# ── In-memory result store keyed by rfp_id (populated on job completion) ─────
+_RESULTS: Dict[str, Any] = {}
 
 
 # ── Request / Response models ─────────────────────────────────────────────────
@@ -75,6 +82,19 @@ class CurrencyNormalizeRequest(BaseModel):
     base_currency: str = "USD"
 
 
+class PricingCorrectionItem(BaseModel):
+    line_item_id: Optional[str] = None
+    field: str
+    old_value: Any = None
+    new_value: Any
+
+
+class CorrectPricingRequest(BaseModel):
+    rfp_id: str
+    supplier_name: str
+    corrections: List[PricingCorrectionItem]
+
+
 # ── Background job runner ─────────────────────────────────────────────────────
 
 async def _run_pricing_job(job_id: str, rfp_id: str, project_id: Optional[str], base_currency: str):
@@ -84,15 +104,11 @@ async def _run_pricing_job(job_id: str, rfp_id: str, project_id: Optional[str], 
     pricing data is available yet (avoids 500 on fresh projects).
     """
     try:
-        # Attempt to pull parsed pricing data via the project store
-        # If the project store / rfp store exposes raw text we use it;
-        # otherwise we run with an empty list so the job completes cleanly.
         raw: List[Dict[str, Any]] = []
         try:
             from app.services.project_store import get_project_pricing_texts  # type: ignore
             raw = get_project_pricing_texts(rfp_id) or []
         except Exception:
-            # Service not yet implemented or rfp_id not found — run with empty data
             raw = []
 
         agent = PricingAgent(base_currency=base_currency)
@@ -100,6 +116,8 @@ async def _run_pricing_job(job_id: str, rfp_id: str, project_id: Optional[str], 
         result["rfp_id"] = rfp_id
         result["project_id"] = project_id or rfp_id
         _JOBS[job_id] = {"status": "completed", "result": result}
+        # Cache result by rfp_id so GET /result/{rfp_id} can serve it
+        _RESULTS[rfp_id] = result
     except Exception as exc:
         _JOBS[job_id] = {"status": "failed", "error": str(exc)}
 
@@ -131,6 +149,68 @@ async def get_pricing_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
     return {"job_id": job_id, **job}
+
+
+@router.get("/result/{rfp_id}")
+async def get_pricing_result(rfp_id: str):
+    """
+    Returns the most recent completed pricing result for the given rfp_id.
+    The result is cached in _RESULTS when a /analyze job completes.
+    Returns 404 if no result is available yet (trigger /analyze first).
+    """
+    result = _RESULTS.get(rfp_id)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pricing result found for rfp_id '{rfp_id}'. Run /pricing-analysis/analyze first."
+        )
+    return result
+
+
+@router.post("/correct")
+async def correct_pricing(payload: CorrectPricingRequest):
+    """
+    Apply manual corrections to a cached pricing result for a given rfp_id + supplier.
+    Corrections are applied in-memory and the updated result is returned.
+    Each correction specifies a field and new_value to overwrite.
+    """
+    result = _RESULTS.get(payload.rfp_id)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pricing result found for rfp_id '{payload.rfp_id}'. Run /pricing-analysis/analyze first."
+        )
+
+    cost_model = result.get("cost_model", {})
+    supplier_data = cost_model.get(payload.supplier_name) if isinstance(cost_model, dict) else None
+
+    applied: List[Dict[str, Any]] = []
+    for correction in payload.corrections:
+        if supplier_data is not None and correction.field in supplier_data:
+            supplier_data[correction.field] = correction.new_value
+            applied.append({
+                "field": correction.field,
+                "old_value": correction.old_value,
+                "new_value": correction.new_value,
+                "applied": True,
+            })
+        else:
+            applied.append({
+                "field": correction.field,
+                "new_value": correction.new_value,
+                "applied": False,
+                "reason": "field not found in supplier cost model",
+            })
+
+    # Persist corrections back to cache
+    _RESULTS[payload.rfp_id] = result
+
+    return {
+        "rfp_id": payload.rfp_id,
+        "supplier_name": payload.supplier_name,
+        "corrections_applied": applied,
+        "updated_result": result,
+    }
 
 
 @router.post("/analyze-raw")
