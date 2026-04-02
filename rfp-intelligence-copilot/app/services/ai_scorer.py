@@ -200,13 +200,22 @@ def score_question(
 
 def score_questions_parallel(
     questions: List[Dict],
-    supplier_answer: str,
     answers: Dict[str, str],
     cross_answers: Dict[str, Dict],
     supplier_name: str,
     dual_llm: bool = True,
     max_workers: int = 8,
 ) -> Dict[str, Dict]:
+    """Score all questions for a single supplier in parallel.
+
+    Args:
+        questions:     list of RFP question dicts
+        answers:       {question_id: answer_text} for this supplier
+        cross_answers: {question_id: {supplier_name: answer_text}} for all suppliers
+        supplier_name: name of the supplier being scored
+        dual_llm:      whether to use dual-LLM scoring
+        max_workers:   thread pool size
+    """
     results: Dict[str, Dict] = {}
 
     def _score_one(q):
