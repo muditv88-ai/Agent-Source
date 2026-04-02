@@ -153,6 +153,7 @@ def _parse_sheet(file_bytes: bytes, filename: str) -> dict:
     except ImportError:
         raise HTTPException(503, detail="pandas not installed on backend")
 
+    best_sheet = "Sheet1"
     if filename.lower().endswith(".csv"):
         df = pd.read_csv(io.BytesIO(file_bytes))
     else:
