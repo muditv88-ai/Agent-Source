@@ -281,3 +281,58 @@ class ChatContext(BaseModel):
     categories:         Optional[List[str]]  = None
     # Feature flags for this session
     feature_flags:      Optional[FeatureFlags] = None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# AWARD MODELS
+# ════════════════════════════════════════════════════════════════════════════
+
+class AwardRequest(BaseModel):
+    """Request body for POST /award/{project_id}/run"""
+    user_input: str = Field(
+        default="",
+        description="Optional natural-language instruction to the award agent, "
+                    "e.g. 'award to lowest cost supplier' or 'exclude Supplier B'."
+    )
+    tech_weight:        float = Field(default=70.0, ge=0, le=100,
+                                      description="Weight for technical score (0-100)")
+    commercial_weight:  float = Field(default=30.0, ge=0, le=100,
+                                      description="Weight for commercial/pricing score (0-100)")
+    excluded_suppliers: List[str] = Field(default_factory=list,
+                                          description="Supplier names to exclude from this run")
+    notes: Optional[str] = Field(default=None, description="Internal notes for this award scenario")
+
+
+class AwardResult(BaseModel):
+    """Response model for POST /award/{project_id}/run and GET saved award endpoints."""
+    scenario_id:     str
+    project_id:      str
+    status:          str                     = "complete"
+    awarded_to:      Optional[str]           = None   # winning supplier name
+    ranking:         List[Dict[str, Any]]    = []     # [{supplier, score, rank, ...}]
+    narrative:       Optional[str]           = None   # LLM-generated award memo
+    rationale:       Optional[str]           = None   # short rationale string
+    tech_weight:     float                   = 70.0
+    commercial_weight: float                 = 30.0
+    excluded_suppliers: List[str]            = []
+    approval_status: Optional[str]           = None   # None | pending_approval | approved
+    approver_email:  Optional[str]           = None
+    notifications_drafted: bool              = False
+    created_at:      Optional[str]           = None   # ISO 8601 timestamp
+    notes:           Optional[str]           = None
+
+
+# ── Saved Scenario ────────────────────────────────────────────────────────────
+class SavedScenario(BaseModel):
+    """A named what-if scenario saved under a project."""
+    scenario_id:        str
+    project_id:         str
+    name:               Optional[str]           = None
+    description:        Optional[str]           = None
+    tech_weight:        float                   = 70.0
+    commercial_weight:  float                   = 30.0
+    excluded_suppliers: List[str]               = []
+    weight_adjustments: Dict[str, float]        = {}
+    ranking:            List[Dict[str, Any]]    = []
+    created_at:         Optional[str]           = None
+    notes:              Optional[str]           = None
