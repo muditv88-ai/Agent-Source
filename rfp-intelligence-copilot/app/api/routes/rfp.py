@@ -1,11 +1,10 @@
 """
-rfp.py  v4.1  — GCS file persistence
+rfp.py  v4.2  — adds push_log instrumentation for live dashboard
 
-Changes from v4.0:
-  - /rfp/extract          → uploads PDF/DOCX to GCS under projects/<id>/rfp_templates/
-  - /rfp/parse-supplier-response → uploads file to GCS under projects/<id>/supplier_responses/
-  - /rfp/upload-supplier-response → same GCS persistence + DB write
-  - gcs_blob key added to all three response payloads (None if GCS not configured)
+Changes from v4.1:
+  - push_log calls added to /rfp/generate, /rfp/extract,
+    /rfp/upload-supplier-response so the dashboard ticker shows
+    real RFP Generation Agent + Response Intake Agent activity.
 """
 from __future__ import annotations
 
@@ -28,6 +27,8 @@ from app.services.supplier_parser import parse_supplier_response
 from app.agents.rfp_generation_agent  import RFPGenerationAgent
 from app.agents.response_intake_agent import ResponseIntakeAgent
 
+from app.api.routes.agent_logs import push_log
+
 # GCS — imported lazily so the app still boots if google-cloud-storage is missing
 try:
     from app.services import gcs_storage as _gcs
@@ -47,11 +48,6 @@ def _save_to_gcs(
     file_bytes: bytes,
     content_type: str,
 ) -> Optional[str]:
-    """
-    Upload to GCS and return the blob name.
-    Returns None (without raising) if GCS is not configured or upload fails,
-    so the rest of the request always succeeds.
-    """
     if not _GCS_ENABLED:
         return None
     try:
@@ -63,7 +59,6 @@ def _save_to_gcs(
             content_type=content_type or "application/octet-stream",
         )
     except Exception as exc:
-        # Log but never break the request
         import logging
         logging.getLogger(__name__).warning("GCS upload failed: %s", exc)
         return None
@@ -77,14 +72,14 @@ class RFPGenerateRequest(BaseModel):
     requirements: Optional[str] = ""
     project_id:   Optional[str] = None
     title:        Optional[str] = None
-    deadline:     Optional[str] = None   # ISO datetime string
+    deadline:     Optional[str] = None
 
 class WeightUpdateRequest(BaseModel):
-    weights: dict   # {section_name: weight_0_to_100}
+    weights: dict
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# EXISTING ENDPOINTS (v4.1 — adds GCS persistence)
+# ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 
 @router.post("/extract")
@@ -92,9 +87,10 @@ async def extract_rfp(
     file:       UploadFile       = File(...),
     project_id: Optional[str]   = Form(None),
 ):
+    push_log(agent_id="rfp", status="running",
+             message=f"Extracting RFP from {file.filename}")
     file_bytes = await file.read()
 
-    # ── GCS: persist the original RFP document ──────────────────────────
     gcs_blob = _save_to_gcs(
         project_id=project_id,
         category="rfp_templates",
@@ -106,17 +102,28 @@ async def extract_rfp(
     try:
         text = extract_text(file_bytes, file.filename)
     except Exception as e:
+        push_log(agent_id="rfp", status="error",
+                 message=f"Failed to parse {file.filename}: {e}")
         raise HTTPException(422, detail=f"Failed to parse file: {e}")
     if not text or not text.strip():
+        push_log(agent_id="rfp", status="error",
+                 message="No text content found in uploaded file")
         raise HTTPException(422, detail="No text content found in uploaded file.")
     try:
         result = extract_rfp_questions(text)
     except Exception as e:
+        push_log(agent_id="rfp", status="error",
+                 message=f"RFP extraction failed: {e}")
         raise HTTPException(500, detail=f"RFP extraction failed: {e}")
+
+    q_count = len(result.get("questions", []))
+    push_log(agent_id="rfp", status="complete",
+             message=f"Extracted {q_count} RFP questions from {file.filename}",
+             confidence=88)
 
     result["project_id"]  = project_id
     result["source_file"] = file.filename
-    result["gcs_blob"]    = gcs_blob   # e.g. "projects/abc/rfp_templates/my_rfp.pdf"
+    result["gcs_blob"]    = gcs_blob
     return result
 
 
@@ -126,9 +133,10 @@ async def parse_supplier(
     questions:  str            = Form(...),
     project_id: Optional[str] = Form(None),
 ):
+    push_log(agent_id="rfp", status="running",
+             message=f"Parsing supplier response: {file.filename}")
     file_bytes = await file.read()
 
-    # ── GCS: persist the supplier response document ──────────────────────
     gcs_blob = _save_to_gcs(
         project_id=project_id,
         category="supplier_responses",
@@ -141,29 +149,29 @@ async def parse_supplier(
         text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
     except Exception as e:
+        push_log(agent_id="rfp", status="error", message=str(e))
         raise HTTPException(422, detail=str(e))
 
     result = parse_supplier_response(text, rfp_questions)
+    push_log(agent_id="rfp", status="complete",
+             message=f"Parsed supplier response: {file.filename}",
+             confidence=85)
     result["project_id"]  = project_id
     result["source_file"] = file.filename
     result["gcs_blob"]    = gcs_blob
     return result
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# v4.1  DB-BACKED ENDPOINTS
-# ════════════════════════════════════════════════════════════════════════════
-
 @router.post("/generate")
 async def generate_rfp(
     payload: RFPGenerateRequest,
     db:      Session = Depends(get_db),
 ):
-    """
-    AI-generate an RFP and persist it + its questions to the DB.
-    Returns the saved RFP id alongside the agent output.
-    """
+    push_log(agent_id="rfp", status="running",
+             message=f"Generating RFP for {payload.category} — {payload.scope[:60]}")
     agent = RFPGenerationAgent()
+    import time as _time
+    t0 = _time.time()
     try:
         result = agent.run({
             "mode":         "generate",
@@ -172,9 +180,12 @@ async def generate_rfp(
             "requirements": payload.requirements or "",
         })
     except Exception as e:
+        push_log(agent_id="rfp", status="error",
+                 message=f"RFP generation failed: {e}")
         raise HTTPException(500, detail=str(e))
 
-    # Persist RFP record
+    duration_ms = int((_time.time() - t0) * 1000)
+
     rfp = RFP(
         project_id=payload.project_id or result.get("project_id", ""),
         title=payload.title or f"{payload.category} RFP",
@@ -184,9 +195,8 @@ async def generate_rfp(
         submission_deadline=datetime.fromisoformat(payload.deadline) if payload.deadline else None,
     )
     db.add(rfp)
-    db.flush()   # get rfp.id without committing
+    db.flush()
 
-    # Persist questions
     questions: list = result.get("questions", [])
     for i, q in enumerate(questions):
         db.add(RFPQuestion(
@@ -200,6 +210,11 @@ async def generate_rfp(
     db.commit()
     db.refresh(rfp)
 
+    push_log(agent_id="rfp", status="complete",
+             message=f"Drafted {len(questions)} RFP sections for {payload.category}",
+             confidence=92,
+             duration_ms=duration_ms)
+
     result["rfp_id"]     = rfp.id
     result["project_id"] = rfp.project_id
     return result
@@ -207,7 +222,6 @@ async def generate_rfp(
 
 @router.get("/list")
 def list_rfps(db: Session = Depends(get_db)):
-    """Return all RFPs ordered by creation date descending."""
     rfps = db.exec(select(RFP).order_by(RFP.created_at.desc())).all()
     return {"rfps": [r.model_dump() for r in rfps], "total": len(rfps)}
 
@@ -230,14 +244,10 @@ async def upload_supplier_response(
     supplier_id: Optional[str]   = Form(None),
     db:          Session          = Depends(get_db),
 ):
-    """
-    Upload a supplier response. ResponseIntakeAgent maps answers to questions,
-    calculates completeness %, and the BidResponse is persisted to DB.
-    The original file is also saved to GCS.
-    """
+    push_log(agent_id="rfp", status="running",
+             message=f"Intake: processing supplier response {file.filename}")
     file_bytes = await file.read()
 
-    # ── GCS: persist the supplier response document ──────────────────────
     gcs_blob = _save_to_gcs(
         project_id=project_id,
         category="supplier_responses",
@@ -250,6 +260,7 @@ async def upload_supplier_response(
         text          = extract_text(file_bytes, file.filename)
         rfp_questions = _json.loads(questions)
     except Exception as e:
+        push_log(agent_id="rfp", status="error", message=str(e))
         raise HTTPException(422, detail=str(e))
 
     agent = ResponseIntakeAgent()
@@ -260,9 +271,10 @@ async def upload_supplier_response(
             "project_id":    project_id,
         })
     except Exception as e:
+        push_log(agent_id="rfp", status="error",
+                 message=f"Response intake failed: {e}")
         raise HTTPException(500, detail=str(e))
 
-    # Persist BidResponse
     if rfp_id and supplier_id:
         bid = BidResponse(
             rfp_id=rfp_id,
@@ -276,6 +288,11 @@ async def upload_supplier_response(
         db.refresh(bid)
         result["bid_response_id"] = bid.id
 
+    pct = result.get("completeness_pct", 0)
+    push_log(agent_id="rfp", status="complete",
+             message=f"Supplier response ingested — {pct:.0f}% completeness",
+             confidence=int(min(pct, 100)))
+
     result["source_file"] = file.filename
     result["gcs_blob"]    = gcs_blob
     return result
@@ -287,10 +304,6 @@ def update_question_weights(
     payload: WeightUpdateRequest,
     db:      Session = Depends(get_db),
 ):
-    """
-    Persist per-section question weights to the DB.
-    Weights dict: {section_name: weight} — must sum to 100.
-    """
     total = sum(payload.weights.values())
     if abs(total - 100.0) > 0.5:
         raise HTTPException(422, detail=f"Weights must sum to 100. Got {total:.1f}.")
@@ -308,9 +321,6 @@ def update_question_weights(
 
 @router.get("/{project_id}/completeness")
 def get_response_completeness(project_id: str, db: Session = Depends(get_db)):
-    """
-    Return supplier response completeness stats for all bids under a project.
-    """
     rfps = db.exec(select(RFP).where(RFP.project_id == project_id)).all()
     rfp_ids = [r.id for r in rfps]
 

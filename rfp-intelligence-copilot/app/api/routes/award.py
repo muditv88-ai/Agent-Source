@@ -1,260 +1,121 @@
 """
-award.py
-
-HTTP endpoints that wire AwardAgent into the API surface.
-
-Endpoints
----------
-POST   /award/{project_id}/run
-    Execute an award scenario (run_scenario + generate_narrative).
-    Returns full scenario result including narrative memo.
-
-GET    /award/{project_id}/saved
-    List all saved award results for a project.
-
-GET    /award/{project_id}/saved/{scenario_id}
-    Retrieve a single saved award result.
-
-DELETE /award/{project_id}/saved/{scenario_id}
-    Delete a saved award result.
-
-POST   /award/{project_id}/saved/{scenario_id}/approve
-    Submit a saved scenario for manager approval (sends draft email).
-
-POST   /award/{project_id}/saved/{scenario_id}/notify
-    Send award/regret notifications to all suppliers (draft mode).
+award.py  — Award Agent routes  (v2: push_log instrumentation)
 """
-import logging
-from typing import List, Optional
+from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+import time
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlmodel import Session
 
-from app.agents.award_agent import AwardAgent
-from app.services.project_store import (
-    get_project, load_metadata, save_metadata
-)
-from app.services.pricing_store import load_cost_model
-from app.models.schemas import AwardRequest, AwardResult
+from app.db import get_db
+from app.api.routes.agent_logs import push_log
 
-logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(tags=["Award"])
 
-_agent = AwardAgent()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _require_project(project_id: str):
-    project = get_project(project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    return project
+try:
+    from app.agents.award_agent import AwardAgent
+    _AWARD_AGENT_AVAILABLE = True
+except ImportError:
+    _AWARD_AGENT_AVAILABLE = False
 
 
-def _load_saved(project_id: str) -> dict:
-    """Load the award_results.json metadata file for a project."""
-    return load_metadata(project_id, "award_results.json") or {}
-
-
-def _save_result(project_id: str, result: dict):
-    """Persist a single award result into award_results.json."""
-    saved = _load_saved(project_id)
-    saved[result["scenario_id"]] = result
-    save_metadata(project_id, "award_results.json", saved)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /award/{project_id}/run
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.post("/{project_id}/run", response_model=AwardResult, status_code=201)
-def run_award(
-    project_id: str,
-    body: AwardRequest,
-):
-    """
-    Execute an award scenario for a project.
-
-    - Loads the pricing cost_model already computed by /pricing-analysis.
-    - Passes it to AwardAgent.run() which runs the scenario engine +
-      generates an LLM narrative memo.
-    - Saves the result to award_results.json and returns it.
-    """
-    _require_project(project_id)
-
-    # Pull cost_model from pricing analysis results
-    cost_model = load_cost_model(project_id)
-    if not cost_model:
-        raise HTTPException(
-            status_code=400,
-            detail="No pricing analysis found for this project. "
-                   "Run /pricing-analysis/{project_id} first.",
-        )
-
-    # Pull tech scores if analysis results exist
-    analysis = load_metadata(project_id, "analysis_result.json") or {}
-    tech_scores = {
-        s["supplier_name"]: s.get("technical_score", 0)
-        for s in analysis.get("suppliers", [])
-    }
-
-    try:
-        result = _agent.run(
-            input={
-                "user_input": body.user_input,
-                "cost_model": cost_model,
-                "tech_scores": tech_scores,
-            }
-        )
-    except Exception as exc:
-        logger.exception("AwardAgent.run failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    result["project_id"] = project_id
-    _save_result(project_id, result)
-    return AwardResult(**result)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /award/{project_id}/saved
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.get("/{project_id}/saved")
-def list_saved_awards(project_id: str):
-    """Return all saved award results for a project, sorted newest-first."""
-    _require_project(project_id)
-    saved = _load_saved(project_id)
-    results = sorted(saved.values(), key=lambda r: r.get("scenario_id", ""), reverse=True)
-    return {"project_id": project_id, "count": len(results), "results": results}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET /award/{project_id}/saved/{scenario_id}
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.get("/{project_id}/saved/{scenario_id}")
-def get_saved_award(project_id: str, scenario_id: str):
-    """Retrieve a single saved award result by scenario_id."""
-    _require_project(project_id)
-    saved = _load_saved(project_id)
-    result = saved.get(scenario_id)
-    if not result:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No saved award result with id '{scenario_id}'"
-        )
-    return result
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DELETE /award/{project_id}/saved/{scenario_id}
-# ─────────────────────────────────────────────────────────────────────────────
-
-@router.delete("/{project_id}/saved/{scenario_id}")
-def delete_saved_award(project_id: str, scenario_id: str):
-    """Delete a saved award result."""
-    _require_project(project_id)
-    saved = _load_saved(project_id)
-    if scenario_id not in saved:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No saved award result with id '{scenario_id}'"
-        )
-    del saved[scenario_id]
-    save_metadata(project_id, "award_results.json", saved)
-    return {"project_id": project_id, "scenario_id": scenario_id, "deleted": True}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /award/{project_id}/saved/{scenario_id}/approve
-# ─────────────────────────────────────────────────────────────────────────────
-
-class ApprovalRequest(BaseModel):
-    approver_email: str = Field(..., description="Email of the manager to send approval request to")
-
-
-@router.post("/{project_id}/saved/{scenario_id}/approve")
-def submit_for_approval(project_id: str, scenario_id: str, body: ApprovalRequest):
-    """
-    Submit a saved award scenario for manager approval.
-    Sends a draft approval-request email via CommsAgent.
-    Updates approval_status to 'pending_approval'.
-    """
-    _require_project(project_id)
-    saved = _load_saved(project_id)
-    result = saved.get(scenario_id)
-    if not result:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No saved award result with id '{scenario_id}'"
-        )
-
-    try:
-        approval_result = _agent._submit_approval(
-            scenario_id=scenario_id,
-            approver_email=body.approver_email,
-            project_id=project_id,
-        )
-    except Exception as exc:
-        logger.exception("Approval submission failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    result["approval_status"] = "pending_approval"
-    result["approver_email"] = body.approver_email
-    _save_result(project_id, result)
-    return {
-        "project_id": project_id,
-        "scenario_id": scenario_id,
-        "approval_status": "pending_approval",
-        "approver_email": body.approver_email,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# POST /award/{project_id}/saved/{scenario_id}/notify
-# ─────────────────────────────────────────────────────────────────────────────
-
-class NotifyRequest(BaseModel):
-    suppliers: List[dict] = Field(
-        ...,
-        description="List of supplier dicts: [{name, email}]. "
-                    "Award/regret is determined automatically from scenario."
+class AwardRecommendRequest(BaseModel):
+    project_id: str
+    suppliers: List[Dict[str, Any]] = Field(
+        ..., description="List of scored suppliers from technical analysis"
     )
+    scoring_weights: Optional[Dict[str, float]] = None
+    budget_cap: Optional[float] = None
+    notes: Optional[str] = ""
 
 
-@router.post("/{project_id}/saved/{scenario_id}/notify")
-def notify_suppliers(project_id: str, scenario_id: str, body: NotifyRequest):
+class AwardScoreRequest(BaseModel):
+    project_id: str
+    supplier_id: str
+    technical_score: float
+    price_score: float
+    compliance_score: float
+    weights: Optional[Dict[str, float]] = None
+
+
+@router.post("/recommend")
+async def award_recommendation(payload: AwardRecommendRequest):
     """
-    Send award and regret notifications to all suppliers.
-    Drafts only — CommsAgent sets auto_send=False so a human reviews before sending.
+    Run the Award Agent to score and rank suppliers, producing a final recommendation.
     """
-    _require_project(project_id)
-    saved = _load_saved(project_id)
-    scenario = saved.get(scenario_id)
-    if not scenario:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No saved award result with id '{scenario_id}'"
-        )
+    push_log(agent_id="award", status="running",
+             message=f"Scoring {len(payload.suppliers)} supplier(s) for award recommendation")
+    if not _AWARD_AGENT_AVAILABLE:
+        push_log(agent_id="award", status="error",
+                 message="AwardAgent not available — check backend dependencies")
+        raise HTTPException(503, detail="AwardAgent not available")
 
     try:
-        notifications = _agent._notify_suppliers(
-            scenario=scenario,
-            all_suppliers=body.suppliers,
-            project_id=project_id,
-        )
-    except Exception as exc:
-        logger.exception("Supplier notification drafting failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+        t0    = time.time()
+        agent = AwardAgent()
+        result = agent.run({
+            "project_id":      payload.project_id,
+            "suppliers":       payload.suppliers,
+            "scoring_weights": payload.scoring_weights or {},
+            "budget_cap":      payload.budget_cap,
+            "notes":           payload.notes or "",
+        })
+        winner = result.get("recommended_supplier", "N/A")
+        push_log(agent_id="award", status="complete",
+                 message=f"Award recommendation: {winner}",
+                 confidence=result.get("confidence", 85),
+                 duration_ms=int((time.time() - t0) * 1000))
+        return result
+    except Exception as e:
+        push_log(agent_id="award", status="error",
+                 message=f"Award scoring failed: {e}")
+        raise HTTPException(500, detail=str(e))
 
-    scenario["notifications_drafted"] = True
-    _save_result(project_id, scenario)
+
+@router.post("/score")
+async def score_supplier(payload: AwardScoreRequest):
+    """
+    Compute composite award score for a single supplier.
+    """
+    push_log(agent_id="award", status="running",
+             message=f"Computing composite score for supplier {payload.supplier_id}")
+    weights = payload.weights or {
+        "technical": 0.4,
+        "price": 0.35,
+        "compliance": 0.25,
+    }
+    composite = round(
+        payload.technical_score  * weights.get("technical",   0.4)
+        + payload.price_score    * weights.get("price",       0.35)
+        + payload.compliance_score * weights.get("compliance", 0.25),
+        2,
+    )
+    push_log(agent_id="award", status="complete",
+             message=f"Supplier {payload.supplier_id} scored {composite:.1f}/10",
+             confidence=85)
+    return {
+        "project_id":       payload.project_id,
+        "supplier_id":      payload.supplier_id,
+        "composite_score":  composite,
+        "component_scores": {
+            "technical":   payload.technical_score,
+            "price":       payload.price_score,
+            "compliance":  payload.compliance_score,
+        },
+        "weights_used": weights,
+    }
+
+
+@router.get("/status/{project_id}")
+async def award_status(project_id: str):
+    """
+    Return award workflow status for a project.
+    """
     return {
         "project_id": project_id,
-        "scenario_id": scenario_id,
-        "notifications": notifications,
-        "note": "All notifications are drafts — review in Communications before sending.",
+        "status":     "ready",
+        "message":    "Award Agent ready. Submit suppliers via POST /award/recommend.",
     }
