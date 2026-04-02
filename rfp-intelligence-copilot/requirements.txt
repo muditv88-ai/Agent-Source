@@ -19,6 +19,7 @@ httpx>=0.27.0
 
 # Data
 pandas>=2.0.0
+openpyxl>=3.1.0
 
 # Document parsing
 pdfplumber>=0.11.0
