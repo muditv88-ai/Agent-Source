@@ -221,6 +221,7 @@ def extract_rfp_questions(document_text: str, cache_dir: str = None) -> Dict[str
 
     # ── Cache write ──────────────────────────────────────────────────────────
     if cache_dir:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)  # ensure directory exists
         cache_path.write_text(json.dumps(output, indent=2))
         print(f"[rfp_extractor] cache WRITE for hash {doc_hash[:8]}")
 
