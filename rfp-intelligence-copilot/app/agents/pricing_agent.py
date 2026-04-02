@@ -293,6 +293,19 @@ class PricingAgent(BaseAgent):
                 "all_line_items": d.get("line_items", d.get("all_line_items", [])),
                 "total_cost": d.get("total_cost", 0),
             })
+
+        # Guard: no supplier data yet (no files uploaded for this RFP)
+        if not suppliers:
+            return {
+                "cost_model": {},
+                "analysis": {"error": "No supplier pricing data available for this RFP yet."},
+                "normalized": normalized,
+                "suppliers": [],
+                "total_costs": [],
+            }
+
         cost_model = build_cost_model(suppliers)
-        analysis = analyze_pricing(cost_model)
+        # FIX: analyze_pricing = run_pricing_analysis(suppliers_pricing: list[dict])
+        # Must pass `suppliers` list, NOT the cost_model dict.
+        analysis = analyze_pricing(suppliers)
         return {"cost_model": cost_model, "analysis": analysis, "normalized": normalized}
