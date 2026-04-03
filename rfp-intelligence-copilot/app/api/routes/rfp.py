@@ -1,14 +1,17 @@
 """
-rfp.py  v4.2  — adds push_log instrumentation for live dashboard
+rfp.py  v4.3  — adds GET /{project_id}/questions for AnalysisPage
 
-Changes from v4.1:
-  - push_log calls added to /rfp/generate, /rfp/extract,
-    /rfp/upload-supplier-response so the dashboard ticker shows
-    real RFP Generation Agent + Response Intake Agent activity.
+Changes from v4.2:
+  - GET /{project_id}/questions  → fetch questions for the latest RFP
+    belonging to a project (DB-first, falls back to questions.json in
+    project_store).  Called by AnalysisPage before POST /technical-analysis/run.
+  - GET /{project_id}/rfps       → list all RFPs for a project (future
+    RFP-selector dropdown support).
 """
 from __future__ import annotations
 
 import json as _json
+import logging
 from datetime import datetime
 from typing import List, Optional
 
@@ -29,12 +32,21 @@ from app.agents.response_intake_agent import ResponseIntakeAgent
 
 from app.api.routes.agent_logs import push_log
 
+logger = logging.getLogger(__name__)
+
 # GCS — imported lazily so the app still boots if google-cloud-storage is missing
 try:
     from app.services import gcs_storage as _gcs
     _GCS_ENABLED = True
 except Exception:
     _GCS_ENABLED = False
+
+# project_store — used as fallback for questions.json when DB rows are absent
+try:
+    from app.services.project_store import load_metadata as _load_metadata
+    _PROJECT_STORE_ENABLED = True
+except Exception:
+    _PROJECT_STORE_ENABLED = False
 
 router = APIRouter()
 
@@ -59,9 +71,35 @@ def _save_to_gcs(
             content_type=content_type or "application/octet-stream",
         )
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("GCS upload failed: %s", exc)
+        logger.warning("GCS upload failed: %s", exc)
         return None
+
+
+def _normalise_question(q: dict, idx: int) -> dict:
+    """
+    Normalise a question row (from DB or questions.json) into the shape
+    expected by AnalysisPage.tsx and TechnicalAnalysisAgent:
+      { question_id, question_text, question_type, category, weight }
+    """
+    # DB RFPQuestion rows use 'question' + 'section'; questions.json may use
+    # 'question_text' + 'category' already.
+    qid   = str(q.get("id") or q.get("question_id") or f"q_{idx:03d}")
+    text  = q.get("question_text") or q.get("question") or ""
+    cat   = q.get("category") or q.get("section") or "General"
+    qtype = q.get("question_type") or (
+        "quantitative" if any(
+            kw in text.lower()
+            for kw in ("lead time", "days", "quantity", "price", "capacity", "tolerance", "dimension")
+        ) else "qualitative"
+    )
+    weight = float(q.get("weight") or 10)
+    return {
+        "question_id":   qid,
+        "question_text": text,
+        "question_type": qtype,
+        "category":      cat,
+        "weight":        weight,
+    }
 
 
 # ── Pydantic request models ────────────────────────────────────────────────
@@ -81,6 +119,88 @@ class WeightUpdateRequest(BaseModel):
 # ════════════════════════════════════════════════════════════════════════════
 # ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
+
+# ── NEW: questions by project_id ──────────────────────────────────────────
+
+@router.get("/{project_id}/rfps")
+def list_rfps_for_project(project_id: str, db: Session = Depends(get_db)):
+    """
+    List all RFPs belonging to a project, newest first.
+    Used by the RFP selector dropdown in AnalysisPage.
+    """
+    rfps = db.exec(
+        select(RFP)
+        .where(RFP.project_id == project_id)
+        .order_by(RFP.created_at.desc())
+    ).all()
+    return {
+        "project_id": project_id,
+        "rfps": [{"id": r.id, "title": r.title, "status": r.status} for r in rfps],
+        "total": len(rfps),
+    }
+
+
+@router.get("/{project_id}/questions")
+def get_questions_for_project(project_id: str, db: Session = Depends(get_db)):
+    """
+    Return the question list for the most recent RFP associated with this
+    project_id.  Falls back to questions.json in project_store if no DB
+    rows are found (covers projects whose RFP was uploaded/parsed without
+    going through the /rfp/generate flow).
+
+    Shape of each item:
+      { question_id, question_text, question_type, category, weight }
+    """
+    # ── 1. Try DB: most recent RFP for this project ───────────────────────
+    rfp = db.exec(
+        select(RFP)
+        .where(RFP.project_id == project_id)
+        .order_by(RFP.created_at.desc())
+    ).first()
+
+    if rfp:
+        rows = db.exec(
+            select(RFPQuestion)
+            .where(RFPQuestion.rfp_id == rfp.id)
+            .order_by(RFPQuestion.order)
+        ).all()
+        if rows:
+            questions = [_normalise_question(r.model_dump(), i) for i, r in enumerate(rows)]
+            return {
+                "project_id": project_id,
+                "rfp_id":     rfp.id,
+                "rfp_title":  rfp.title,
+                "source":     "db",
+                "questions":  questions,
+                "total":      len(questions),
+            }
+
+    # ── 2. Fallback: questions.json from project_store ────────────────────
+    if _PROJECT_STORE_ENABLED:
+        raw_qs = _load_metadata(project_id, "questions.json") or []
+        if raw_qs:
+            questions = [_normalise_question(q if isinstance(q, dict) else {"question_text": str(q)}, i)
+                         for i, q in enumerate(raw_qs)]
+            return {
+                "project_id": project_id,
+                "rfp_id":     None,
+                "rfp_title":  None,
+                "source":     "project_store",
+                "questions":  questions,
+                "total":      len(questions),
+            }
+
+    # ── 3. Nothing found ──────────────────────────────────────────────────
+    raise HTTPException(
+        status_code=404,
+        detail=(
+            f"No RFP questions found for project '{project_id}'. "
+            "Please parse or generate an RFP for this project first."
+        ),
+    )
+
+
+# ── Existing endpoints (unchanged) ───────────────────────────────────────
 
 @router.post("/extract")
 async def extract_rfp(
