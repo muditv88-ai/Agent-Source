@@ -1,0 +1,1041 @@
+{
+  "info": {
+    "name": "RFP Intelligence Copilot API",
+    "description": "Complete API collection for RFP Intelligence Copilot - AI-powered procurement automation",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/health",
+              "host": ["{{base_url}}"],
+              "path": ["health", "health"]
+            }
+          }
+        },
+        {
+          "name": "Root",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/",
+              "host": ["{{base_url}}"],
+              "path": [""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"password123\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth", "login"]}
+          }
+        },
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"newuser\",\n  \"email\": \"user@example.com\",\n  \"password\": \"password123\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/auth/register", "host": ["{{base_url}}"], "path": ["auth", "register"]}
+          }
+        },
+        {
+          "name": "Google Login",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"access_token\": \"ya29.google_access_token_here\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/auth/google", "host": ["{{base_url}}"], "path": ["auth", "google"]}
+          }
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/auth/me", "host": ["{{base_url}}"], "path": ["auth", "me"]}
+          }
+        },
+        {
+          "name": "List Users (Admin)",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/auth/users", "host": ["{{base_url}}"], "path": ["auth", "users"]}
+          }
+        },
+        {
+          "name": "Create User (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"newadmin\",\n  \"password\": \"password123\",\n  \"role\": \"admin\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/auth/users", "host": ["{{base_url}}"], "path": ["auth", "users"]}
+          }
+        },
+        {
+          "name": "Delete User (Admin)",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/auth/users/{{username}}", "host": ["{{base_url}}"], "path": ["auth", "users", "{{username}}"]}
+          }
+        },
+        {
+          "name": "Change Password",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"new_password\": \"newpassword123\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/auth/users/{{username}}/password", "host": ["{{base_url}}"], "path": ["auth", "users", "{{username}}", "password"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Projects",
+      "item": [
+        {
+          "name": "Create Project",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{"key": "name", "value": "My Procurement Project", "type": "text"}]
+            },
+            "url": {"raw": "{{base_url}}/projects", "host": ["{{base_url}}"], "path": ["projects"]}
+          }
+        },
+        {
+          "name": "List Projects",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects", "host": ["{{base_url}}"], "path": ["projects"]}
+          }
+        },
+        {
+          "name": "Get Project",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}"]}
+          }
+        },
+        {
+          "name": "Delete Project",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}"]}
+          }
+        },
+        {
+          "name": "Upload RFP File",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [{"key": "file", "type": "file", "description": "PDF, DOCX, XLSX, CSV accepted"}]
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/rfp", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "rfp"]}
+          }
+        },
+        {
+          "name": "Delete RFP File",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/rfp", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "rfp"]}
+          }
+        },
+        {
+          "name": "Upload Supplier Response",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file", "description": "PDF, DOCX, XLSX, CSV accepted"},
+                {"key": "supplier_name", "value": "Acme Corp", "type": "text"}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/supplier", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "supplier"]}
+          }
+        },
+        {
+          "name": "Delete Supplier File",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/supplier/{{filename}}", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "supplier", "{{filename}}"]}
+          }
+        },
+        {
+          "name": "Parse RFP",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/parse", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "parse"]}
+          }
+        },
+        {
+          "name": "Get Parse/Analyze Job Status",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/parse-status/{{job_id}}", "host": ["{{base_url}}"], "path": ["projects", "parse-status", "{{job_id}}"]}
+          }
+        },
+        {
+          "name": "Analyze Project",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/analyze", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "analyze"]}
+          }
+        },
+        {
+          "name": "Rerun Analysis (Stored Files)",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/rerun-analysis", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "rerun-analysis"]}
+          }
+        },
+        {
+          "name": "List Project Files",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/files", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "files"]}
+          }
+        },
+        {
+          "name": "Get File Download URL",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/projects/{{project_id}}/files/rfp/{{filename}}/url?expiry=60",
+              "host": ["{{base_url}}"],
+              "path": ["projects", "{{project_id}}", "files", "rfp", "{{filename}}", "url"],
+              "query": [{"key": "expiry", "value": "60", "description": "Signed URL expiry in minutes"}]
+            }
+          }
+        },
+        {
+          "name": "Get Module States",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/module-states", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "module-states"]}
+          }
+        },
+        {
+          "name": "Update Module State",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"module\": \"rfp\",\n  \"state\": \"active\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/module-states", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "module-states"]}
+          }
+        },
+        {
+          "name": "Update Project Metadata",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Project Name\",\n  \"status\": \"active\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/meta", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "meta"]}
+          }
+        },
+        {
+          "name": "Get Feature Flags",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/feature-flags", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "feature-flags"]}
+          }
+        },
+        {
+          "name": "Update Feature Flags",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"chatbot_actions\": true\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/feature-flags", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "feature-flags"]}
+          }
+        },
+        {
+          "name": "Get Audit Log",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/projects/{{project_id}}/audit-log?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["projects", "{{project_id}}", "audit-log"],
+              "query": [{"key": "limit", "value": "50"}]
+            }
+          }
+        },
+        {
+          "name": "Rename Supplier",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"new_name\": \"Updated Supplier Name\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/projects/{{project_id}}/supplier/{{filename}}/name", "host": ["{{base_url}}"], "path": ["projects", "{{project_id}}", "supplier", "{{filename}}", "name"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "RFP Management",
+      "item": [
+        {
+          "name": "Extract RFP (from file)",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file", "description": "RFP document (PDF, DOCX, XLSX, CSV)"},
+                {"key": "project_id", "value": "{{project_id}}", "type": "text"}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/rfp/extract", "host": ["{{base_url}}"], "path": ["rfp", "extract"]}
+          }
+        },
+        {
+          "name": "Generate RFP (AI)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"Software Development\",\n  \"scope\": \"Build a cross-platform mobile application with iOS and Android support\",\n  \"requirements\": \"Must integrate with existing ERP system, support offline mode, and handle 10,000 concurrent users\",\n  \"project_id\": \"{{project_id}}\",\n  \"title\": \"Mobile App Development RFP\",\n  \"deadline\": \"2026-06-30\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/rfp/generate", "host": ["{{base_url}}"], "path": ["rfp", "generate"]}
+          }
+        },
+        {
+          "name": "Parse Supplier Response",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file", "description": "Supplier response document"},
+                {"key": "questions", "value": "[{\"question_id\": \"q_001\", \"question_text\": \"What is your delivery timeline?\", \"category\": \"Technical\", \"weight\": 10}]", "type": "text", "description": "JSON array of RFP questions"},
+                {"key": "project_id", "value": "{{project_id}}", "type": "text"}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/rfp/parse-supplier-response", "host": ["{{base_url}}"], "path": ["rfp", "parse-supplier-response"]}
+          }
+        },
+        {
+          "name": "Upload Supplier Response (Full Intake)",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file", "description": "Supplier response document"},
+                {"key": "project_id", "value": "{{project_id}}", "type": "text"},
+                {"key": "questions", "value": "[{\"question_id\": \"q_001\", \"question_text\": \"What is your delivery timeline?\", \"category\": \"Technical\", \"weight\": 10}]", "type": "text"},
+                {"key": "rfp_id", "value": "{{rfp_id}}", "type": "text"},
+                {"key": "supplier_id", "value": "{{supplier_id}}", "type": "text"}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/rfp/upload-supplier-response", "host": ["{{base_url}}"], "path": ["rfp", "upload-supplier-response"]}
+          }
+        },
+        {
+          "name": "List All RFPs",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/rfp/list", "host": ["{{base_url}}"], "path": ["rfp", "list"]}
+          }
+        },
+        {
+          "name": "Get RFP Details",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/rfp/{{rfp_id}}", "host": ["{{base_url}}"], "path": ["rfp", "{{rfp_id}}"]}
+          }
+        },
+        {
+          "name": "List RFPs for Project",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/rfp/{{project_id}}/rfps", "host": ["{{base_url}}"], "path": ["rfp", "{{project_id}}", "rfps"]}
+          }
+        },
+        {
+          "name": "Get Project Questions",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/rfp/{{project_id}}/questions", "host": ["{{base_url}}"], "path": ["rfp", "{{project_id}}", "questions"]}
+          }
+        },
+        {
+          "name": "Update Question Weights",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"weights\": {\n    \"Technical\": 40.0,\n    \"Commercial\": 35.0,\n    \"Compliance\": 25.0\n  }\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/rfp/{{rfp_id}}/questions/weights", "host": ["{{base_url}}"], "path": ["rfp", "{{rfp_id}}", "questions", "weights"]}
+          }
+        },
+        {
+          "name": "Get Response Completeness",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/rfp/{{project_id}}/completeness", "host": ["{{base_url}}"], "path": ["rfp", "{{project_id}}", "completeness"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Technical Analysis",
+      "item": [
+        {
+          "name": "Run Analysis",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"questions\": [\n    {\n      \"question_id\": \"q_001\",\n      \"question_text\": \"What is your proposed delivery timeline?\",\n      \"question_type\": \"quantitative\",\n      \"category\": \"Technical\",\n      \"weight\": 10\n    },\n    {\n      \"question_id\": \"q_002\",\n      \"question_text\": \"Describe your quality assurance process.\",\n      \"question_type\": \"qualitative\",\n      \"category\": \"Quality\",\n      \"weight\": 10\n    }\n  ],\n  \"supplier_responses\": {\n    \"Acme Corp\": {\n      \"q_001\": \"We can deliver within 12 weeks from contract signing.\",\n      \"q_002\": \"We use ISO 9001 certified processes with weekly QA reviews.\"\n    },\n    \"Beta Solutions\": {\n      \"q_001\": \"Delivery timeline is 16 weeks.\",\n      \"q_002\": \"Our QA team conducts daily stand-ups and automated testing.\"\n    }\n  },\n  \"weight_overrides\": null,\n  \"min_score\": 4.0,\n  \"disqualify_threshold\": 2.0,\n  \"disqualify_max_weak\": 2\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/technical-analysis/run", "host": ["{{base_url}}"], "path": ["technical-analysis", "run"]}
+          }
+        },
+        {
+          "name": "Get Analysis Job Status",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/technical-analysis/status/{{job_id}}", "host": ["{{base_url}}"], "path": ["technical-analysis", "status", "{{job_id}}"]}
+          }
+        },
+        {
+          "name": "Gap Analysis",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"supplier_scores\": {\n    \"Acme Corp\": {\n      \"q_001\": {\"score\": 8, \"rationale\": \"Good timeline\", \"flagged\": false},\n      \"q_002\": {\"score\": 3, \"rationale\": \"Insufficient QA detail\", \"flagged\": true}\n    }\n  },\n  \"questions\": [\n    {\"question_id\": \"q_001\", \"question_text\": \"Delivery timeline?\", \"category\": \"Technical\", \"weight\": 10},\n    {\"question_id\": \"q_002\", \"question_text\": \"QA process?\", \"category\": \"Quality\", \"weight\": 10}\n  ],\n  \"min_score\": 4.0,\n  \"disqualify_threshold\": 2.0,\n  \"disqualify_max_weak\": 2\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/technical-analysis/gap", "host": ["{{base_url}}"], "path": ["technical-analysis", "gap"]}
+          }
+        },
+        {
+          "name": "Generate Narrative Report",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"supplier_name\": \"Acme Corp\",\n  \"category_scores\": [\n    {\"category\": \"Technical\", \"weighted_score\": 8.5},\n    {\"category\": \"Commercial\", \"weighted_score\": 7.0}\n  ],\n  \"overall_score\": 7.75\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/technical-analysis/report", "host": ["{{base_url}}"], "path": ["technical-analysis", "report"]}
+          }
+        },
+        {
+          "name": "Get Default Weights",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/technical-analysis/weights/defaults", "host": ["{{base_url}}"], "path": ["technical-analysis", "weights", "defaults"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pricing Analysis",
+      "item": [
+        {
+          "name": "Analyze Pricing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"supplier_prices\": {\n    \"Acme Corp\": {\n      \"development\": 120000,\n      \"testing\": 20000,\n      \"maintenance\": 15000\n    },\n    \"Beta Solutions\": {\n      \"development\": 95000,\n      \"testing\": 25000,\n      \"maintenance\": 18000\n    }\n  },\n  \"line_items\": [\"development\", \"testing\", \"maintenance\"],\n  \"context\": \"Mobile app development for enterprise client, 12-month engagement\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/pricing-analysis/analyze", "host": ["{{base_url}}"], "path": ["pricing-analysis", "analyze"]}
+          }
+        },
+        {
+          "name": "Get Market Rates",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"Software Development\",\n  \"line_items\": [\"development\", \"testing\", \"maintenance\"],\n  \"context\": \"Enterprise mobile app development\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/pricing-analysis/market-rates", "host": ["{{base_url}}"], "path": ["pricing-analysis", "market-rates"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Scenarios",
+      "item": [
+        {
+          "name": "Create Scenario",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"title\": \"Accelerated Timeline Scenario\",\n  \"description\": \"Testing feasibility of a 10-week delivery instead of 16-week\",\n  \"milestones\": [\n    {\"name\": \"RFP Release\", \"due_date\": \"2026-04-10\", \"dependencies\": [], \"status\": \"pending\"},\n    {\"name\": \"Supplier Responses Due\", \"due_date\": \"2026-04-25\", \"dependencies\": [\"RFP Release\"], \"status\": \"pending\"},\n    {\"name\": \"Evaluation Complete\", \"due_date\": \"2026-05-05\", \"dependencies\": [\"Supplier Responses Due\"], \"status\": \"pending\"}\n  ],\n  \"constraints\": {\n    \"budget_cap\": 150000,\n    \"max_suppliers\": 5\n  }\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/scenarios/create", "host": ["{{base_url}}"], "path": ["scenarios", "create"]}
+          }
+        },
+        {
+          "name": "Analyze Deadline",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"milestones\": [\n    {\"name\": \"RFP Release\", \"due_date\": \"2026-04-10\", \"dependencies\": [], \"status\": \"complete\"},\n    {\"name\": \"Supplier Responses\", \"due_date\": \"2026-04-25\", \"dependencies\": [\"RFP Release\"], \"status\": \"at_risk\"},\n    {\"name\": \"Contract Award\", \"due_date\": \"2026-05-15\", \"dependencies\": [\"Supplier Responses\"], \"status\": \"pending\"}\n  ],\n  \"context\": \"Q2 procurement cycle with hard board deadline of May 20\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/scenarios/analyze-deadline", "host": ["{{base_url}}"], "path": ["scenarios", "analyze-deadline"]}
+          }
+        },
+        {
+          "name": "Risk Assessment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"scenario_id\": null,\n  \"factors\": [\"budget_overrun\", \"supplier_default\", \"scope_creep\", \"regulatory_changes\"]\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/scenarios/risk-assessment", "host": ["{{base_url}}"], "path": ["scenarios", "risk-assessment"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "item": [
+        {
+          "name": "Send Message (Copilot Agent)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Can you summarize the analysis results for this project and tell me which supplier scored highest?\"\n    }\n  ],\n  \"context\": {\n    \"project_name\": \"Mobile App Procurement\"\n  },\n  \"project_id\": \"{{project_id}}\",\n  \"actor\": \"user\",\n  \"use_copilot_agent\": true\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/chat/message", "host": ["{{base_url}}"], "path": ["chat", "message"]}
+          }
+        },
+        {
+          "name": "Get Chat Audit Log",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/chat/audit/{{project_id}}?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["chat", "audit", "{{project_id}}"],
+              "query": [{"key": "limit", "value": "50"}]
+            }
+          }
+        },
+        {
+          "name": "List Copilot Tools",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/chat/tools", "host": ["{{base_url}}"], "path": ["chat", "tools"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Communications",
+      "item": [
+        {
+          "name": "Draft Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"supplier_id\": \"{{supplier_id}}\",\n  \"supplier_name\": \"Acme Corp\",\n  \"email_type\": \"clarification\",\n  \"context\": \"Their pricing submission is missing unit costs for line item 3 — maintenance support\",\n  \"rfp_title\": \"Mobile App Development RFP\",\n  \"notes\": \"Please respond by April 20th\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/communications/draft", "host": ["{{base_url}}"], "path": ["communications", "draft"]}
+          }
+        },
+        {
+          "name": "Bulk Outreach",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"suppliers\": [\n    {\n      \"supplier_id\": \"supplier_001\",\n      \"supplier_name\": \"Acme Corp\",\n      \"email_type\": \"clarification\",\n      \"context\": \"Missing unit costs for maintenance\"\n    },\n    {\n      \"supplier_id\": \"supplier_002\",\n      \"supplier_name\": \"Beta Solutions\",\n      \"email_type\": \"rejection\",\n      \"context\": \"Score below minimum threshold\"\n    }\n  ],\n  \"rfp_title\": \"Mobile App Development RFP\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/communications/bulk-outreach", "host": ["{{base_url}}"], "path": ["communications", "bulk-outreach"]}
+          }
+        },
+        {
+          "name": "List Email Templates",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/communications/templates", "host": ["{{base_url}}"], "path": ["communications", "templates"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Suppliers",
+      "item": [
+        {
+          "name": "Create Supplier",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Acme Corp\",\n  \"email\": \"procurement@acme.com\",\n  \"contact_name\": \"Jane Smith\",\n  \"phone\": \"+1-555-0100\",\n  \"category\": \"Software Development\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/suppliers/", "host": ["{{base_url}}"], "path": ["suppliers", ""]}
+          }
+        },
+        {
+          "name": "List Suppliers",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/suppliers/?category=Software Development",
+              "host": ["{{base_url}}"],
+              "path": ["suppliers", ""],
+              "query": [
+                {"key": "category", "value": "Software Development", "disabled": true},
+                {"key": "status", "value": "invited", "disabled": true}
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Supplier",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/suppliers/{{supplier_id}}", "host": ["{{base_url}}"], "path": ["suppliers", "{{supplier_id}}"]}
+          }
+        },
+        {
+          "name": "Invite Supplier to Project",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/suppliers/{{supplier_id}}/invite?project_id={{project_id}}&rfp_title=Mobile App Development RFP",
+              "host": ["{{base_url}}"],
+              "path": ["suppliers", "{{supplier_id}}", "invite"],
+              "query": [
+                {"key": "project_id", "value": "{{project_id}}"},
+                {"key": "rfp_title", "value": "Mobile App Development RFP"}
+              ]
+            }
+          }
+        },
+        {
+          "name": "Validate Supplier Docs",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "files", "type": "file", "description": "Insurance certificate, compliance docs, etc."}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/suppliers/{{supplier_id}}/validate-docs", "host": ["{{base_url}}"], "path": ["suppliers", "{{supplier_id}}", "validate-docs"]}
+          }
+        },
+        {
+          "name": "Bulk Invite Suppliers",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"supplier_ids\": [\"supplier_001\", \"supplier_002\", \"supplier_003\"],\n  \"project_id\": \"{{project_id}}\",\n  \"rfp_title\": \"Mobile App Development RFP\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/suppliers/bulk-invite", "host": ["{{base_url}}"], "path": ["suppliers", "bulk-invite"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Files",
+      "item": [
+        {
+          "name": "Upload File",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file"},
+                {"key": "project_id", "value": "{{project_id}}", "type": "text"},
+                {"key": "category", "value": "rfp_templates", "type": "text", "description": "rfp_templates | supplier_responses | drawings | misc"},
+                {"key": "display_name", "value": "Q2 RFP Document", "type": "text"},
+                {"key": "rfp_id", "value": "{{rfp_id}}", "type": "text", "disabled": true},
+                {"key": "supplier_id", "value": "{{supplier_id}}", "type": "text", "disabled": true}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/files/upload", "host": ["{{base_url}}"], "path": ["files", "upload"]}
+          }
+        },
+        {
+          "name": "List Files",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/files/{{project_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["files", "{{project_id}}"],
+              "query": [
+                {"key": "category", "value": "rfp_templates", "disabled": true},
+                {"key": "rfp_id", "value": "{{rfp_id}}", "disabled": true},
+                {"key": "supplier_id", "value": "{{supplier_id}}", "disabled": true}
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get File Download URL",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/files/{{project_id}}/{{file_id}}/url", "host": ["{{base_url}}"], "path": ["files", "{{project_id}}", "{{file_id}}", "url"]}
+          }
+        },
+        {
+          "name": "Trigger File Analysis",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"analysis_type\": \"rfp_parse\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/files/{{project_id}}/{{file_id}}/analyse", "host": ["{{base_url}}"], "path": ["files", "{{project_id}}", "{{file_id}}", "analyse"]}
+          }
+        },
+        {
+          "name": "Delete File",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/files/{{project_id}}/{{file_id}}", "host": ["{{base_url}}"], "path": ["files", "{{project_id}}", "{{file_id}}"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Drawings",
+      "item": [
+        {
+          "name": "Upload Drawing",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {"key": "file", "type": "file", "description": "Technical drawing (PDF, DWG, PNG, etc.)"},
+                {"key": "project_id", "value": "{{project_id}}", "type": "text"},
+                {"key": "part_number", "value": "PN-00123", "type": "text"}
+              ]
+            },
+            "url": {"raw": "{{base_url}}/drawings/upload", "host": ["{{base_url}}"], "path": ["drawings", "upload"]}
+          }
+        },
+        {
+          "name": "Attach Drawing to Line Item",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"drawing_id\": \"{{drawing_id}}\",\n  \"line_item_id\": \"line_001\",\n  \"part_number\": \"PN-00123\",\n  \"revision\": \"B\",\n  \"notes\": \"Updated dimensions per ECR-2025-001\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/drawings/attach", "host": ["{{base_url}}"], "path": ["drawings", "attach"]}
+          }
+        },
+        {
+          "name": "List Project Drawings",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/drawings/{{project_id}}", "host": ["{{base_url}}"], "path": ["drawings", "{{project_id}}"]}
+          }
+        },
+        {
+          "name": "Get Drawings for Line Item",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/drawings/{{project_id}}/{{item_id}}", "host": ["{{base_url}}"], "path": ["drawings", "{{project_id}}", "{{item_id}}"]}
+          }
+        },
+        {
+          "name": "Delete Drawing",
+          "request": {
+            "method": "DELETE",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/drawings/{{drawing_id}}", "host": ["{{base_url}}"], "path": ["drawings", "{{drawing_id}}"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Award",
+      "item": [
+        {
+          "name": "Award Recommendation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"suppliers\": [\n    {\n      \"supplier_id\": \"supplier_001\",\n      \"supplier_name\": \"Acme Corp\",\n      \"overall_score\": 8.5,\n      \"category_scores\": [\n        {\"category\": \"Technical\", \"weighted_score\": 8.8},\n        {\"category\": \"Commercial\", \"weighted_score\": 8.0}\n      ],\n      \"total_price\": 155000,\n      \"disqualified\": false\n    },\n    {\n      \"supplier_id\": \"supplier_002\",\n      \"supplier_name\": \"Beta Solutions\",\n      \"overall_score\": 7.2,\n      \"category_scores\": [\n        {\"category\": \"Technical\", \"weighted_score\": 6.5},\n        {\"category\": \"Commercial\", \"weighted_score\": 8.5}\n      ],\n      \"total_price\": 138000,\n      \"disqualified\": false\n    }\n  ],\n  \"scoring_weights\": {\n    \"technical\": 0.5,\n    \"price\": 0.35,\n    \"compliance\": 0.15\n  },\n  \"budget_cap\": 180000,\n  \"notes\": \"Board requires final decision by end of May 2026\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/award/recommend", "host": ["{{base_url}}"], "path": ["award", "recommend"]}
+          }
+        },
+        {
+          "name": "Score Supplier",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Authorization", "value": "Bearer {{auth_token}}"}
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"project_id\": \"{{project_id}}\",\n  \"supplier_id\": \"{{supplier_id}}\",\n  \"technical_score\": 8.5,\n  \"price_score\": 7.0,\n  \"compliance_score\": 9.0,\n  \"weights\": {\n    \"technical\": 0.4,\n    \"price\": 0.35,\n    \"compliance\": 0.25\n  }\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {"raw": "{{base_url}}/award/score", "host": ["{{base_url}}"], "path": ["award", "score"]}
+          }
+        },
+        {
+          "name": "Get Award Status",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {"raw": "{{base_url}}/award/status/{{project_id}}", "host": ["{{base_url}}"], "path": ["award", "status", "{{project_id}}"]}
+          }
+        }
+      ]
+    },
+    {
+      "name": "Agent Logs",
+      "item": [
+        {
+          "name": "Get Agent Logs",
+          "request": {
+            "method": "GET",
+            "header": [{"key": "Authorization", "value": "Bearer {{auth_token}}"}],
+            "url": {
+              "raw": "{{base_url}}/agent-logs?limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["agent-logs"],
+              "query": [{"key": "limit", "value": "50"}]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {"key": "base_url", "value": "http://localhost:8000", "type": "string"},
+    {"key": "auth_token", "value": "", "type": "string"},
+    {"key": "project_id", "value": "", "type": "string"},
+    {"key": "rfp_id", "value": "", "type": "string"},
+    {"key": "supplier_id", "value": "", "type": "string"},
+    {"key": "file_id", "value": "", "type": "string"},
+    {"key": "job_id", "value": "", "type": "string"},
+    {"key": "drawing_id", "value": "", "type": "string"},
+    {"key": "item_id", "value": "", "type": "string"},
+    {"key": "username", "value": "", "type": "string"},
+    {"key": "filename", "value": "", "type": "string"}
+  ]
+}
