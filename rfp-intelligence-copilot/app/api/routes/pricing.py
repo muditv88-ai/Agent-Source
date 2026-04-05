@@ -160,20 +160,38 @@ def _parse_sheet(file_bytes: bytes, filename: str, sheet_name: str | None = None
     """Parse xlsx/csv into structured rows with diagnostics."""
     try:
         import pandas as pd
-    except ImportError:
+    except ImportError as e:
+        logger.error(f"pandas not installed: {e}")
         raise HTTPException(503, detail="pandas not installed on backend")
 
+    try:
+        import openpyxl
+    except ImportError:
+        logger.warning("openpyxl not installed — Excel files may fail")
+        # Don't fail, just warn — CSV files will still work
+
     is_csv = filename.lower().endswith(".csv")
+    logger.info(f"Parsing file: {filename}, is_csv={is_csv}, header_row={header_row}")
 
     # For xlsx, get all sheet names
-    sheet_names = [] if is_csv else _get_excel_sheet_names(file_bytes)
+    try:
+        sheet_names = [] if is_csv else _get_excel_sheet_names(file_bytes)
+    except Exception as e:
+        logger.warning(f"Could not detect sheet names: {e}")
+        sheet_names = []
+
     best_sheet = sheet_name or (sheet_names[0] if sheet_names else "Sheet1")
+    logger.info(f"Using sheet: {best_sheet}")
 
     # Read the appropriate sheet
-    if is_csv:
-        df = pd.read_csv(io.BytesIO(file_bytes), header=header_row)
-    else:
-        df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=best_sheet, header=header_row)
+    try:
+        if is_csv:
+            df = pd.read_csv(io.BytesIO(file_bytes), header=header_row)
+        else:
+            df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=best_sheet, header=header_row)
+    except Exception as e:
+        logger.error(f"Failed to read file {filename}: {e}")
+        raise ValueError(f"Failed to parse file: {str(e)}")
 
     # Normalise column names
     df.columns = [str(c).strip() for c in df.columns]
