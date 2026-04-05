@@ -37,6 +37,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -193,6 +194,39 @@ def get_download_url(
         "url":          url,
         "expires_in_minutes": expiry_minutes,
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /files/{project_id}/{file_id}/content
+# ---------------------------------------------------------------------------
+
+@router.get("/{project_id}/{file_id}/content")
+def get_file_content(
+    project_id: str,
+    file_id:    str,
+    db:         Session = Depends(get_db),
+):
+    """
+    Download file content directly (no CORS issues).
+    This avoids the browser fetching GCS signed URLs directly.
+    Returns the file bytes with appropriate content-type header.
+    """
+    record = _get_file_or_404(db, project_id, file_id)
+
+    try:
+        from google.cloud import storage as _gcs
+        import os
+        client = _gcs.Client()
+        bucket = client.bucket(os.getenv("GCS_BUCKET_NAME", "rfp-copilot-files"))
+        file_bytes = bucket.blob(record.gcs_path).download_as_bytes()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"GCS download error: {exc}")
+
+    return StreamingResponse(
+        iter([file_bytes]),
+        media_type=record.content_type or "application/octet-stream",
+        headers={"Content-Disposition": f"inline; filename=\"{record.filename}\""},
+    )
 
 
 # ---------------------------------------------------------------------------
