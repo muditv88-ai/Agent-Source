@@ -139,31 +139,38 @@ def list_project_files(
     db:          Session = Depends(get_db),
 ):
     """List all files stored for a project, with optional filters."""
-    stmt = select(ProjectFile).where(ProjectFile.project_id == project_id)
-    if category:
-        stmt = stmt.where(ProjectFile.category == category)
-    if rfp_id:
-        stmt = stmt.where(ProjectFile.rfp_id == rfp_id)
-    if supplier_id:
-        stmt = stmt.where(ProjectFile.supplier_id == supplier_id)
+    try:
+        stmt = select(ProjectFile).where(ProjectFile.project_id == project_id)
+        if category:
+            stmt = stmt.where(ProjectFile.category == category)
+        if rfp_id:
+            stmt = stmt.where(ProjectFile.rfp_id == rfp_id)
+        if supplier_id:
+            stmt = stmt.where(ProjectFile.supplier_id == supplier_id)
 
-    records = db.exec(stmt.order_by(ProjectFile.created_at.desc())).all()
+        records = db.exec(stmt.order_by(ProjectFile.created_at.desc())).all()
 
-    return [
-        {
-            "id":              r.id,
-            "filename":        r.filename,
-            "display_name":    r.display_name,
-            "category":        r.category,
-            "content_type":    r.content_type,
-            "size_bytes":      r.size_bytes,
-            "rfp_id":          r.rfp_id,
-            "supplier_id":     r.supplier_id,
-            "analysis_status": r.analysis_status,
-            "created_at":      r.created_at.isoformat(),
-        }
-        for r in records
-    ]
+        return [
+            {
+                "id":              r.id,
+                "filename":        r.filename,
+                "display_name":    r.display_name,
+                "category":        r.category,
+                "content_type":    r.content_type,
+                "size_bytes":      r.size_bytes,
+                "rfp_id":          r.rfp_id,
+                "supplier_id":     r.supplier_id,
+                "analysis_status": r.analysis_status,
+                "created_at":      r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in records
+        ]
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("Error listing project files")
+        # Return empty list instead of 500 on DB errors
+        # This allows the frontend to gracefully handle missing files
+        return []
 
 
 # ---------------------------------------------------------------------------
