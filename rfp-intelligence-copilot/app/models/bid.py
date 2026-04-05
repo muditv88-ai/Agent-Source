@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -29,7 +30,7 @@ class BidResponse(SQLModel, table=True):
 
     rfp:      Optional["RFP"]       = Relationship(back_populates="responses")   # type: ignore[name-defined]
     supplier: Optional["Supplier"]  = Relationship(back_populates="responses")   # type: ignore[name-defined]
-    answers:  List["BidAnswer"]     = Relationship(back_populates="response")
+    answers:  Mapped[List["BidAnswer"]] = Relationship(back_populates="response")
 
 
 class BidAnswer(SQLModel, table=True):

@@ -7,6 +7,9 @@ Changes:
 
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env file before any imports that need env vars
+
 import os
 from contextlib import asynccontextmanager
 

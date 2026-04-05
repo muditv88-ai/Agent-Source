@@ -16,9 +16,10 @@ Flow:
 
 v3.1: Respects feature flags 'function_calling' and 'chatbot_actions'.
 """
-import os
+
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -60,7 +61,9 @@ class CopilotAgent(BaseAgent):
             Tool(
                 name="generate_rfp",
                 description="Generate or parse an RFP document. Use for: 'create an RFP', 'generate RFP for...', 'parse this RFP'.",
-                fn=lambda **kw: self._delegate("app.agents.rfp_generation_agent", "RFPGenerationAgent", kw),
+                fn=lambda **kw: self._delegate(
+                    "app.agents.rfp_generation_agent", "RFPGenerationAgent", kw
+                ),
                 schema={
                     "type": "object",
                     "properties": {
@@ -73,7 +76,9 @@ class CopilotAgent(BaseAgent):
             Tool(
                 name="send_communication",
                 description="Draft or send a procurement email to a supplier. Use for: 'send email', 'draft invite', 'notify supplier'.",
-                fn=lambda **kw: self._delegate("app.agents.comms_agent", "CommsAgent", kw),
+                fn=lambda **kw: self._delegate(
+                    "app.agents.comms_agent", "CommsAgent", kw
+                ),
                 schema={
                     "type": "object",
                     "properties": {
@@ -86,7 +91,9 @@ class CopilotAgent(BaseAgent):
             Tool(
                 name="run_award_scenario",
                 description="Execute and explain an award scenario. Use for: 'award scenario', 'who should we award', 'split the award'.",
-                fn=lambda **kw: self._delegate("app.agents.award_agent", "AwardAgent", kw),
+                fn=lambda **kw: self._delegate(
+                    "app.agents.award_agent", "AwardAgent", kw
+                ),
                 schema={
                     "type": "object",
                     "properties": {
@@ -98,7 +105,9 @@ class CopilotAgent(BaseAgent):
             Tool(
                 name="get_analysis_summary",
                 description="Return a technical analysis summary for suppliers. Use for: 'show scores', 'who scored highest', 'technical evaluation'.",
-                fn=lambda **kw: self._delegate("app.agents.technical_analysis_agent", "TechnicalAnalysisAgent", kw),
+                fn=lambda **kw: self._delegate(
+                    "app.agents.technical_analysis_agent", "TechnicalAnalysisAgent", kw
+                ),
                 schema={
                     "type": "object",
                     "properties": {
@@ -113,6 +122,7 @@ class CopilotAgent(BaseAgent):
     def _delegate(self, module_name: str, class_name: str, payload: dict) -> dict:
         """Lazy-load and run a specialist agent."""
         import importlib
+
         module = importlib.import_module(module_name)
         AgentClass = getattr(module, class_name)
         return AgentClass().run(payload)
@@ -128,6 +138,7 @@ class CopilotAgent(BaseAgent):
         if project_id:
             try:
                 from app.services.feature_flags import flag_enabled
+
                 function_calling_enabled = flag_enabled(project_id, "function_calling")
                 chatbot_actions_enabled = flag_enabled(project_id, "chatbot_actions")
             except Exception:
@@ -139,8 +150,12 @@ class CopilotAgent(BaseAgent):
 
         # If function-calling is disabled, skip directly to fallback
         if not function_calling_enabled:
-            logger.info("function_calling flag off for project %s — using chat_agent fallback", project_id)
+            logger.info(
+                "function_calling flag off for project %s — using chat_agent fallback",
+                project_id,
+            )
             from app.services.chat_agent import chat_with_agent
+
             return chat_with_agent(messages, project_context)
 
         # Build context string for system prompt
@@ -150,9 +165,13 @@ class CopilotAgent(BaseAgent):
 
         api_messages = [
             {"role": "system", "content": SYSTEM_PROMPT + ctx_str},
-            *[{"role": m["role"] if isinstance(m, dict) else m.role,
-               "content": m["content"] if isinstance(m, dict) else m.content}
-              for m in messages],
+            *[
+                {
+                    "role": m["role"] if isinstance(m, dict) else m.role,
+                    "content": m["content"] if isinstance(m, dict) else m.content,
+                }
+                for m in messages
+            ],
         ]
 
         try:
@@ -183,20 +202,29 @@ class CopilotAgent(BaseAgent):
                 tool_result = self.tools[tool_name].call(**tool_args)
 
                 # Second LLM call: summarise tool result in natural language
-                api_messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {"name": tool_name, "arguments": tc.function.arguments},
-                    }],
-                })
-                api_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(tool_result),
-                })
+                api_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": tc.function.arguments,
+                                },
+                            }
+                        ],
+                    }
+                )
+                api_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(tool_result),
+                    }
+                )
                 final_resp = self._call_with_retry(
                     client.chat.completions.create,
                     model=MODEL,
@@ -212,6 +240,9 @@ class CopilotAgent(BaseAgent):
             return {"message": msg.content or "", "action": None}
 
         except Exception as e:
-            logger.error("CopilotAgent LLM call failed: %s — falling back to chat_agent", e)
+            logger.error(
+                "CopilotAgent LLM call failed: %s — falling back to chat_agent", e
+            )
             from app.services.chat_agent import chat_with_agent
+
             return chat_with_agent(messages, project_context)

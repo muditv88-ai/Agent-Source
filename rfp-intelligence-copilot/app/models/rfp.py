@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -52,4 +53,4 @@ class RFP(SQLModel, table=True):
     # BidResponse and Drawing back-refs were removed — they referenced models
     # not imported here and caused secondary mapper-init cascade failures.
     # RFP<->BidResponse joins are done via explicit select() queries in routes.
-    questions: List[RFPQuestion] = Relationship(back_populates="rfp")
+    questions: Mapped[List[RFPQuestion]] = Relationship(back_populates="rfp")

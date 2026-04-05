@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -28,9 +29,9 @@ class Supplier(SQLModel, table=True):
     created_at:   datetime = Field(default_factory=datetime.utcnow)
     updated_at:   datetime = Field(default_factory=datetime.utcnow)
 
-    documents: List["SupplierDocument"] = Relationship(back_populates="supplier")
-    responses: List["BidResponse"]      = Relationship(back_populates="supplier")   # type: ignore[name-defined]
-    comms:     List["CommunicationLog"] = Relationship(back_populates="supplier")   # type: ignore[name-defined]
+    documents: Mapped[List["SupplierDocument"]] = Relationship(back_populates="supplier")
+    responses: Mapped[List["BidResponse"]]      = Relationship(back_populates="supplier")   # type: ignore[name-defined]
+    comms:     Mapped[List["CommunicationLog"]] = Relationship(back_populates="supplier")   # type: ignore[name-defined]
 
 
 class SupplierDocument(SQLModel, table=True):
