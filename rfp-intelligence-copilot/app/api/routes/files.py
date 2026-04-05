@@ -70,49 +70,58 @@ def _get_file_or_404(db: Session, project_id: str, file_id: str) -> ProjectFile:
 async def upload_project_file(
     file:         UploadFile = File(...),
     project_id:   str        = Form(...),
-    category:     str        = Form(...),
-    user_id:      str        = Form(...),
+    category:     str        = Form(default="supplier_responses"),
+    user_id:      str        = Form(default="anonymous"),
     display_name: Optional[str] = Form(default=None),
     rfp_id:       Optional[str] = Form(default=None),
     supplier_id:  Optional[str] = Form(default=None),
     db:           Session    = Depends(get_db),
 ):
     """Upload a file to GCS and register it in the project file library."""
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Upload request: category={category}, project_id={project_id}, filename={file.filename}")
+
     if category not in VALID_CATEGORIES:
+        logger.error(f"Invalid category: {category}. Valid: {VALID_CATEGORIES}")
         raise HTTPException(
             status_code=422,
-            detail=f"category must be one of {sorted(VALID_CATEGORIES)}",
+            detail=f"category must be one of {sorted(VALID_CATEGORIES)}, got '{category}'",
         )
 
-    file_bytes = await file.read()
-    content_type = file.content_type or "application/octet-stream"
+    try:
+        file_bytes = await file.read()
+        content_type = file.content_type or "application/octet-stream"
 
-    # Upload to GCS
-    blob_name = gcs_storage.upload_file(
-        project_id=project_id,
-        category=category,
-        filename=file.filename,
-        file_bytes=file_bytes,
-        content_type=content_type,
-    )
+        # Upload to GCS
+        blob_name = gcs_storage.upload_file(
+            project_id=project_id,
+            category=category,
+            filename=file.filename,
+            file_bytes=file_bytes,
+            content_type=content_type,
+        )
 
-    # Persist metadata to DB
-    record = ProjectFile(
-        project_id=project_id,
-        user_id=user_id,
-        rfp_id=rfp_id,
-        supplier_id=supplier_id,
-        filename=file.filename,
-        display_name=display_name or file.filename,
-        category=category,
-        content_type=content_type,
-        size_bytes=len(file_bytes),
-        gcs_path=blob_name,
-        analysis_status="none",
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
+        # Persist metadata to DB
+        record = ProjectFile(
+            project_id=project_id,
+            user_id=user_id,
+            rfp_id=rfp_id,
+            supplier_id=supplier_id,
+            filename=file.filename,
+            display_name=display_name or file.filename,
+            category=category,
+            content_type=content_type,
+            size_bytes=len(file_bytes),
+            gcs_path=blob_name,
+            analysis_status="none",
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+    except Exception as e:
+        logger.exception(f"Error uploading file {file.filename}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
     return {
         "id":           record.id,
