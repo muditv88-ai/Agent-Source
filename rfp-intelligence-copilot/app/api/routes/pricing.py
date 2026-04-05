@@ -368,42 +368,49 @@ async def ingest_pricing_file_v2(
     sheet_name:    Optional[str] = Form(None),
 ):
     """Parse xlsx/csv, return full parsed data + diagnostics for UI review."""
-    push_log(agent_id="pricing", status="running",
-             message=f"Parsing pricing file: {file.filename}")
-    file_bytes = await file.read()
-
     try:
-        hrow = int(header_row) if header_row else 0
-        parsed = _parse_sheet(file_bytes, file.filename or "upload", sheet_name=sheet_name, header_row=hrow)
+        push_log(agent_id="pricing", status="running",
+                 message=f"Parsing pricing file: {file.filename}")
+        file_bytes = await file.read()
+
+        try:
+            hrow = int(header_row) if header_row else 0
+            parsed = _parse_sheet(file_bytes, file.filename or "upload", sheet_name=sheet_name, header_row=hrow)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Sheet parse failed")
+            push_log(agent_id="pricing", status="error", message=f"Parse failed: {exc}")
+            raise HTTPException(400, detail=f"Could not parse file: {str(exc)}")
+
+        staging_id = str(uuid.uuid4())
+        _STAGING[staging_id] = {
+            "rows":        parsed["rows"],
+            "project_id":  project_id,
+            "supplier_name": supplier_name or file.filename,
+            "file_bytes":  file_bytes,
+            "filename":    file.filename,
+            "content_type": file.content_type,
+        }
+
+        push_log(agent_id="pricing", status="complete",
+                 message=f"Parsed {len(parsed['rows'])} line items",
+                 confidence=81)
+
+        return {
+            "rows":                 parsed["rows"],
+            "staging_id":           staging_id,
+            "sheet_names":          parsed.get("sheet_names", []),
+            "selected_sheet":       parsed.get("selected_sheet", "Sheet1"),
+            "detected_header_row":  parsed.get("detected_header_row", 0),
+            "diagnostics":          parsed["diagnostics"],
+        }
     except HTTPException:
         raise
-    except Exception as exc:
-        logger.exception("Sheet parse failed")
-        push_log(agent_id="pricing", status="error", message=f"Parse failed: {exc}")
-        raise HTTPException(500, detail=f"Could not parse file: {exc}")
-
-    staging_id = str(uuid.uuid4())
-    _STAGING[staging_id] = {
-        "rows":        parsed["rows"],
-        "project_id":  project_id,
-        "supplier_name": supplier_name or file.filename,
-        "file_bytes":  file_bytes,
-        "filename":    file.filename,
-        "content_type": file.content_type,
-    }
-
-    push_log(agent_id="pricing", status="complete",
-             message=f"Parsed {len(parsed['rows'])} line items",
-             confidence=81)
-
-    return {
-        "rows":                 parsed["rows"],
-        "staging_id":           staging_id,
-        "sheet_names":          parsed.get("sheet_names", []),
-        "selected_sheet":       parsed.get("selected_sheet", "Sheet1"),
-        "detected_header_row":  parsed.get("detected_header_row", 0),
-        "diagnostics":          parsed["diagnostics"],
-    }
+    except Exception as e:
+        logger.exception("Unexpected error in ingest-v2")
+        push_log(agent_id="pricing", status="error", message=f"Internal error: {str(e)}")
+        raise HTTPException(500, detail=f"Internal error: {str(e)}")
 
 
 class ReparseRequest(BaseModel):

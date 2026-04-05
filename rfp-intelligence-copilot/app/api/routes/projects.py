@@ -77,7 +77,14 @@ async def create_new_project(name: str = Form(...)):
 
 @router.get("")
 async def list_all_projects():
-    return {"projects": list_projects()}
+    try:
+        projects = list_projects()
+        return {"projects": projects if isinstance(projects, list) else []}
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("Error listing projects")
+        # Return empty list on error instead of 500
+        return {"projects": []}
 
 
 @router.get("/{project_id}")
