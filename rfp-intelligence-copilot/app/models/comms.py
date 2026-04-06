@@ -1,8 +1,10 @@
 """
 CommunicationLog SQLModel table definition.
 Every email sent via CommsAgent is recorded here.
+
+NOTE: `from __future__ import annotations` is intentionally absent.
+SQLAlchemy 2.0 requires proper type hints for relationships.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime

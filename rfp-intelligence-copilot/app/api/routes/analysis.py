@@ -49,7 +49,6 @@ from app.services.project_store import (
 )
 from app.services.document_parser import parse_document
 from app.services.workbook_parser import parse_workbook
-from app.services.aggregator import aggregate_supplier_scores
 from app.api.routes.agent_logs import push_log
 
 logger = logging.getLogger(__name__)

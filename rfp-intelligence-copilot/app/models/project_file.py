@@ -1,8 +1,10 @@
 """
 ProjectFile — persists metadata about every file stored in GCS,
 linked to a project_id (and optionally an rfp_id or supplier_id).
+
+NOTE: `from __future__ import annotations` is intentionally absent.
+SQLAlchemy 2.0 requires proper type hints for relationships.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime

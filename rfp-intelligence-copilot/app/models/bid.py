@@ -1,13 +1,14 @@
 """
 BidResponse and BidAnswer SQLModel table definitions.
+
+NOTE: `from __future__ import annotations` is intentionally absent.
+SQLAlchemy 2.0 requires proper type hints for relationships.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -28,9 +29,11 @@ class BidResponse(SQLModel, table=True):
     submitted_at:    datetime = Field(default_factory=datetime.utcnow)
     evaluated_at:    Optional[datetime] = None
 
-    rfp:      Optional["RFP"]       = Relationship(back_populates="responses")   # type: ignore[name-defined]
+    # Relationships with forward references
+    # Note: RFP back-refs removed to avoid mapper cascade failures
+    rfp:      Optional["RFP"]       = Relationship()   # type: ignore[name-defined]
     supplier: Optional["Supplier"]  = Relationship(back_populates="responses")   # type: ignore[name-defined]
-    answers:  Mapped[List["BidAnswer"]] = Relationship(back_populates="response")
+    answers:  Optional[List["BidAnswer"]] = Relationship(back_populates="response")
 
 
 class BidAnswer(SQLModel, table=True):

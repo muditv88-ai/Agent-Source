@@ -1,7 +1,8 @@
 """
 files.py — /files router
 
-Persistent, per-project file storage backed by Google Cloud Storage.
+Persistent, per-project file storage backed by configurable storage backend.
+Supports local filesystem, Google Cloud Storage, and Hugging Face datasets.
 Files are uploaded once and can be re-used for analysis without re-uploading.
 
 Endpoints
@@ -43,7 +44,7 @@ from sqlmodel import Session, select
 
 from app.db import get_db
 from app.models.project_file import ProjectFile
-from app.services import gcs_storage
+from app.services import project_store
 
 router = APIRouter()
 
@@ -77,7 +78,7 @@ async def upload_project_file(
     supplier_id:  Optional[str] = Form(default=None),
     db:           Session    = Depends(get_db),
 ):
-    """Upload a file to GCS and register it in the project file library."""
+    """Upload a file to the configured storage backend and register it in the project file library."""
     import logging
     logger = logging.getLogger(__name__)
     logger.info(f"Upload request: category={category}, project_id={project_id}, filename={file.filename}")
@@ -93,14 +94,21 @@ async def upload_project_file(
         file_bytes = await file.read()
         content_type = file.content_type or "application/octet-stream"
 
-        # Upload to GCS
-        blob_name = gcs_storage.upload_file(
+        # Upload to storage backend (local, GCS, or HF based on STORAGE_BACKEND env var)
+        local_path = project_store.save_category_file(
             project_id=project_id,
             category=category,
             filename=file.filename,
-            file_bytes=file_bytes,
-            content_type=content_type,
+            data=file_bytes,
         )
+
+        # Determine storage path string for DB
+        if project_store.STORAGE_BACKEND == "gcs":
+            storage_path = f"projects/{project_id}/{category}/{file.filename}"
+        elif project_store.STORAGE_BACKEND == "hf":
+            storage_path = f"projects/{project_id}/{category}/{file.filename}"
+        else:
+            storage_path = str(local_path)
 
         # Persist metadata to DB
         record = ProjectFile(
@@ -113,7 +121,7 @@ async def upload_project_file(
             category=category,
             content_type=content_type,
             size_bytes=len(file_bytes),
-            gcs_path=blob_name,
+            gcs_path=storage_path,
             analysis_status="none",
         )
         db.add(record)
@@ -343,9 +351,9 @@ def delete_project_file(
     file_id:    str,
     db:         Session = Depends(get_db),
 ):
-    """Delete a file from GCS and remove its DB record."""
+    """Delete a file from the configured storage backend and remove its DB record."""
     record = _get_file_or_404(db, project_id, file_id)
-    gcs_storage.delete_file(record.gcs_path)
+    project_store.delete_category_file(project_id, record.category, record.filename)
     db.delete(record)
     db.commit()
     return

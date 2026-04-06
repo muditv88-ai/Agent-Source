@@ -1,8 +1,10 @@
 """
 Drawing SQLModel table definition.
 Technical drawings attached to RFPs and line items.
+
+NOTE: `from __future__ import annotations` is intentionally absent.
+SQLAlchemy 2.0 requires proper type hints for relationships.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime
@@ -28,4 +30,5 @@ class Drawing(SQLModel, table=True):
     description:  Optional[str] = None
     uploaded_at:  datetime = Field(default_factory=datetime.utcnow)
 
-    rfp: Optional["RFP"] = Relationship(back_populates="drawings")   # type: ignore[name-defined]
+    # Note: RFP back-refs removed to avoid mapper cascade failures
+    rfp: Optional["RFP"] = Relationship()   # type: ignore[name-defined]

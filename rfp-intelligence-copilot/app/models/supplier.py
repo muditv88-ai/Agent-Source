@@ -1,13 +1,16 @@
 """
 Supplier and SupplierDocument SQLModel table definitions.
+
+NOTE: `from __future__ import annotations` is intentionally absent.
+SQLAlchemy's relationship() resolver evaluates annotations eagerly at
+mapper-configuration time.  Deferred annotations break the generic List['SupplierDocument']
+resolution and cause an InvalidRequestError on first DB query.
 """
-from __future__ import annotations
 
 import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy.orm import Mapped
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -29,9 +32,10 @@ class Supplier(SQLModel, table=True):
     created_at:   datetime = Field(default_factory=datetime.utcnow)
     updated_at:   datetime = Field(default_factory=datetime.utcnow)
 
-    documents: Mapped[List["SupplierDocument"]] = Relationship(back_populates="supplier")
-    responses: Mapped[List["BidResponse"]]      = Relationship(back_populates="supplier")   # type: ignore[name-defined]
-    comms:     Mapped[List["CommunicationLog"]] = Relationship(back_populates="supplier")   # type: ignore[name-defined]
+    # Relationships with forward references (defined after these classes)
+    documents: Optional[List["SupplierDocument"]] = Relationship(back_populates="supplier")
+    responses: Optional[List["BidResponse"]]      = Relationship(back_populates="supplier")   # type: ignore[name-defined]
+    comms:     Optional[List["CommunicationLog"]] = Relationship(back_populates="supplier")   # type: ignore[name-defined]
 
 
 class SupplierDocument(SQLModel, table=True):

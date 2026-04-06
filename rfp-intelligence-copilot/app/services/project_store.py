@@ -436,6 +436,35 @@ def delete_rfp_file(project_id: str) -> bool:
     return True
 
 
+def save_category_file(project_id: str, category: str, filename: str, data: bytes) -> Path:
+    """
+    Generic function to save files in any category (rfp_templates, supplier_responses, drawings, misc).
+    Respects STORAGE_BACKEND setting and stores to local filesystem when STORAGE_BACKEND=local.
+    """
+    local_path = PROJECTS_DIR / project_id / category / filename
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    local_path.write_bytes(data)
+
+    if _gcs_enabled:
+        _gcs_upload_file(f"projects/{project_id}/{category}/{filename}", data)
+    elif STORAGE_BACKEND == "hf":
+        _hf.write_bytes(f"projects/{project_id}/{category}/{filename}", data)
+
+    return local_path
+
+
+def delete_category_file(project_id: str, category: str, filename: str) -> bool:
+    """Delete a file from any category."""
+    local_path = PROJECTS_DIR / project_id / category / filename
+    if local_path.exists():
+        local_path.unlink()
+    if _gcs_enabled:
+        _gcs_delete_blob(f"projects/{project_id}/{category}/{filename}")
+    elif STORAGE_BACKEND == "hf":
+        _hf.delete_file(f"projects/{project_id}/{category}/{filename}")
+    return True
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # File listing
 # ════════════════════════════════════════════════════════════════════════════
