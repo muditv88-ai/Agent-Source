@@ -548,7 +548,7 @@ async def confirm_questions(payload: ConfirmQuestionsRequest):
 
         # Save to metadata
         save_metadata(payload.project_id, "questions.json", normalized_qs)
-        update_module_state(payload.project_id, "technical", "questions_loaded")
+        update_module_state(payload.project_id, "technical", "complete")
 
         categories = list(set(q.get("category", "General") for q in normalized_qs))
         push_log(agent_id="technical", status="complete",
