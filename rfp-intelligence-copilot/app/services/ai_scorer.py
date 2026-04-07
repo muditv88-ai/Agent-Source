@@ -150,11 +150,33 @@ def score_question(
     all_supplier_answers: Dict[str, str] = None,
     dual_llm: bool = True,
 ) -> Dict[str, Any]:
+    # Handle empty response (skip LLM, return score 0)
+    if question.get("response_quality") == "empty" or not supplier_answer or supplier_answer.strip() == "No response provided":
+        return {
+            "score": 0.0,
+            "primary_score": 0.0,
+            "checker_score": 0.0,
+            "score_delta": 0.0,
+            "flagged": False,
+            "rationale": "No response provided",
+            "checker_rationale": "",
+        }
+
     context = ""
     if all_supplier_answers and question["question_type"] == "quantitative":
         context = "\nOther suppliers' answers for context:\n" + "".join(
             f"- {s}: {a}\n" for s, a in all_supplier_answers.items()
         )
+
+    # Build prompt with optional compliance hint and template warning
+    hint_text = ""
+    score_hint = question.get("score_hint")
+    if score_hint is not None:
+        hint_text = f"\nCompliance Indicator (pre-assessment): {score_hint:.1f}/1.0"
+
+    template_note = ""
+    if question.get("response_quality") == "template":
+        template_note = "\nNOTE: This response appears to be a template placeholder. Score conservatively and look for specific evidence."
 
     prompt = (
         f"Question: {question['question_text']}\n"
@@ -163,6 +185,8 @@ def score_question(
         f"Scoring Guidance: {question.get('scoring_guidance', 'None')}\n"
         f"Supplier Answer: {supplier_answer[:600]}"
         f"{context}"
+        f"{hint_text}"
+        f"{template_note}"
     )
 
     if dual_llm:

@@ -49,6 +49,7 @@ from app.services.project_store import (
 )
 from app.services.document_parser import parse_document
 from app.services.workbook_parser import parse_workbook
+from app.services.technical_parser import parse_technical_file
 from app.api.routes.agent_logs import push_log
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,9 @@ class ParsedQuestion(BaseModel):
     supplier_name: Optional[str] = None
     response: Optional[str] = None
     comments: Optional[str] = None
+    score_hint: Optional[float] = None        # 0.0–1.0 from compliance status
+    status: Optional[str] = None               # "pass" | "partial" | "fail" | "unknown"
+    response_quality: Optional[str] = None     # "full" | "template" | "empty"
 
 
 class SheetPreview(BaseModel):
@@ -444,87 +448,78 @@ async def parse_questions_file(
     project_id: str = Form(...),
 ):
     """
-    Parse an uploaded question file (XLSX/PDF/DOCX).
-    Returns a preview of questions organized by sheet.
+    Parse an uploaded question file (XLSX only for technical questions).
+    Returns a preview of questions organized by sheet with supplier names,
+    compliance hints, and response quality assessments.
     """
     push_log(agent_id="technical", status="running",
              message="Parsing question file...")
 
-    # Validate MIME type
-    allowed_types = [
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-        "application/pdf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "text/plain",
-    ]
-    if file.content_type and file.content_type not in allowed_types:
+    # Validate file extension (XLSX only for technical parsing)
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
         push_log(agent_id="technical", status="error",
-                 message=f"Unsupported file type: {file.content_type}")
-        raise HTTPException(status_code=415, detail="Unsupported file type")
+                 message=f"Unsupported file type: {file.filename}. Please upload .xlsx format.")
+        raise HTTPException(status_code=415, detail="File could not be read as Excel. Please upload .xlsx format.")
 
     try:
-        # Save temp file
-        temp_path = PROJECTS_DIR / project_id / "temp" / file.filename
-        temp_path.parent.mkdir(parents=True, exist_ok=True)
-
+        # Read file bytes
         content = await file.read()
-        temp_path.write_bytes(content)
 
-        sheets_data: Dict[str, List[ParsedQuestion]] = {}
-        all_questions: List[ParsedQuestion] = []
-        suppliers_set = set()
+        # Parse using technical_parser
+        try:
+            result = parse_technical_file(content, file.filename)
+        except Exception as e:
+            if "InvalidFileException" in str(type(e)):
+                push_log(agent_id="technical", status="error",
+                         message=f"File could not be read as Excel")
+                raise HTTPException(status_code=415, detail="File could not be read as Excel. Please upload .xlsx format.")
+            raise
 
-        if file.filename.lower().endswith((".xlsx", ".xls")):
-            # Parse Excel workbook
-            parsed = parse_workbook(str(temp_path))
-            sheets = parsed.get("sheets", {})
+        # Check if any questions were found
+        if result["total_questions"] == 0:
+            push_log(agent_id="technical", status="error",
+                     message="No question rows detected in file")
+            raise HTTPException(status_code=400, detail="No question rows detected. Ensure the file contains Q# and Question columns.")
 
-            for sheet_name, rows in sheets.items():
-                sheet_questions = _extract_questions_from_workbook({sheet_name: rows})
-                sheets_data[sheet_name] = sheet_questions
-                all_questions.extend(sheet_questions)
-                for q in sheet_questions:
-                    if q.supplier_name:
-                        suppliers_set.add(q.supplier_name)
+        # Convert parser result to response format
+        sheet_previews = []
+        for sheet_result in result["sheets"]:
+            # Convert parsed questions to ParsedQuestion objects
+            parsed_questions = []
+            for q in sheet_result["questions"]:
+                parsed_questions.append(ParsedQuestion(
+                    question_id=q.get("question_id"),
+                    question_text=q.get("question_text"),
+                    category=q.get("category"),
+                    supplier_name=q.get("supplier_name"),
+                    response=q.get("response"),
+                    comments=q.get("comments"),
+                    score_hint=q.get("score_hint"),
+                    status=q.get("status"),
+                    response_quality=q.get("response_quality"),
+                ))
 
-        elif file.filename.lower().endswith((".pdf", ".docx", ".doc", ".txt")):
-            # Parse PDF/DOCX
-            parsed = parse_document(str(temp_path))
-            full_text = parsed.get("full_text", "")
-            sheet_questions = _extract_questions_from_text(full_text)
-            sheets_data["Document"] = sheet_questions
-            all_questions = sheet_questions
-
-        else:
-            raise ValueError(f"Unsupported file format: {file.filename}")
-
-        # Optional: validate via ResponseIntakeAgent if needed
-        # For now, just log the parsed structure
-        logger.info(f"Parsed {len(all_questions)} questions from {len(sheets_data)} sheet(s)")
-
-        # Clean up temp file
-        temp_path.unlink(missing_ok=True)
+            sheet_previews.append(SheetPreview(
+                sheet_name=f"{sheet_result['sheet_name']} — {sheet_result['section_name']}",
+                row_count=sheet_result["row_count"],
+                columns_detected=sheet_result["columns_detected"],
+                questions=parsed_questions,
+            ))
 
         push_log(agent_id="technical", status="complete",
-                 message=f"Parsed {len(all_questions)} questions from {len(sheets_data)} sheet(s)")
+                 message=f"Parsed {result['total_questions']} questions from {len(result['sheets'])} sheets, "
+                         f"suppliers: {', '.join(result['suppliers_detected'])}")
 
         return ParseQuestionsResponse(
-            sheets=[
-                SheetPreview(
-                    sheet_name=sheet_name,
-                    row_count=len(questions),
-                    columns_detected=list(set(k for q in questions for k in q.dict().keys() if q.dict()[k])),
-                    questions=questions,
-                )
-                for sheet_name, questions in sheets_data.items()
-            ],
-            total_questions=len(all_questions),
-            suppliers_detected=sorted(list(suppliers_set)),
+            sheets=sheet_previews,
+            total_questions=result["total_questions"],
+            suppliers_detected=result["suppliers_detected"],
         ).dict()
 
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Parse questions error: {e}", exc_info=True)
         push_log(agent_id="technical", status="error", message=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
