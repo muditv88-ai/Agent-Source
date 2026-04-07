@@ -464,11 +464,14 @@ async def parse_questions_file(
     try:
         # Read file bytes
         content = await file.read()
+        logger.info(f"Received file: {file.filename}, size: {len(content)} bytes")
 
         # Parse using technical_parser
         try:
             result = parse_technical_file(content, file.filename)
+            logger.info(f"Parse result: {result['total_questions']} questions found")
         except Exception as e:
+            logger.error(f"Parse error: {type(e).__name__}: {e}", exc_info=True)
             if "InvalidFileException" in str(type(e)):
                 push_log(agent_id="technical", status="error",
                          message=f"File could not be read as Excel")

@@ -106,14 +106,16 @@ def detect_sections(ws: "Worksheet") -> List[Dict[str, Any]]:
         return []
 
     # FORMAT A: Has section headers
+    logger.debug(f"detect_sections: FORMAT A parsing, max_row={max_row}, has_section_headers={has_section_headers}")
     current_row = 1
     while current_row <= max_row:
         # Find next section header
         header_row_idx = None
         section_name = None
+        skip_to_row = None  # If we find a section to skip, move to next row
 
         for row_idx in range(current_row, max_row + 1):
-            non_empty = [c for c in ws[row_idx] if c.value is not None]
+            non_empty = [c.value for c in ws[row_idx] if c.value is not None]
             if not non_empty:
                 continue
 
@@ -124,12 +126,17 @@ def detect_sections(ws: "Worksheet") -> List[Dict[str, Any]]:
             if "section" in first_val and non_empty_count < 3:
                 # Skip pricing sections
                 if any(skip in first_val for skip in ["pricing", "commercial", "sku", "section c"]):
-                    current_row = row_idx + 1
+                    skip_to_row = row_idx + 1
                     continue
 
                 header_row_idx = row_idx
                 section_name = str(non_empty[0]).strip()
                 break
+
+        # If we found a section to skip, move past it and continue looking
+        if skip_to_row and not header_row_idx:
+            current_row = skip_to_row
+            continue
 
         if not header_row_idx:
             break
@@ -137,7 +144,7 @@ def detect_sections(ws: "Worksheet") -> List[Dict[str, Any]]:
         # Find column headers row (first row after section header with >= 3 non-empty cells)
         col_header_idx = None
         for row_idx in range(header_row_idx + 1, max_row + 1):
-            non_empty = [c for c in ws[row_idx] if c.value is not None]
+            non_empty = [c.value for c in ws[row_idx] if c.value is not None]
             if len(non_empty) >= 3:
                 col_header_idx = row_idx
                 break
@@ -149,7 +156,7 @@ def detect_sections(ws: "Worksheet") -> List[Dict[str, Any]]:
         # Find data end (next section header or end of sheet)
         data_end_idx = max_row
         for row_idx in range(col_header_idx + 1, max_row + 1):
-            non_empty = [c for c in ws[row_idx] if c.value is not None]
+            non_empty = [c.value for c in ws[row_idx] if c.value is not None]
             if not non_empty:
                 continue
 
@@ -426,9 +433,11 @@ def parse_technical_file(file_bytes: bytes, filename: str) -> Dict[str, Any]:
 
     # Load workbook
     try:
+        logger.debug(f"parse_technical_file: Loading {len(file_bytes)} bytes as Excel")
         wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+        logger.debug(f"parse_technical_file: Workbook loaded, sheets: {wb.sheetnames}")
     except (InvalidFileException, Exception) as e:
-        logger.error(f"Failed to load workbook: {e}")
+        logger.error(f"Failed to load workbook: {e}", exc_info=True)
         raise InvalidFileException(f"File could not be read as Excel: {e}")
 
     fmt = detect_format(wb)
@@ -442,9 +451,9 @@ def parse_technical_file(file_bytes: bytes, filename: str) -> Dict[str, Any]:
         supplier_name = extract_supplier_name(ws, ws.title, filename)
 
         for section in sections:
-            # Get header row
-            header_row_idx = section["header_row_idx"]
-            header_row = [ws.cell(header_row_idx, col_idx + 1).value for col_idx in range(ws.max_column)]
+            # Get column header row (the row BEFORE data_start_idx)
+            col_header_row_idx = section["data_start_idx"] - 1
+            header_row = [ws.cell(col_header_row_idx, col_idx + 1).value for col_idx in range(ws.max_column)]
 
             # Map columns
             col_mapping = map_columns(header_row)
